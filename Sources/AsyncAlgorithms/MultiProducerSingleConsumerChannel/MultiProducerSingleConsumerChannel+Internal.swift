@@ -11,75 +11,132 @@
 
 import DequeModule
 
-struct _AsyncBackPressuredStreamWatermarkBackPressureStrategy<Element> {
+@usableFromInline
+struct _MultiProducerSingleConsumerChannelWatermarkBackpressureStrategy<Element>: Sendable, CustomStringConvertible {
     /// The low watermark where demand should start.
-    private let low: Int
-    /// The high watermark where demand should be stopped.
-    private let high: Int
-    private var currentWatermark: Int = 0
-    private let waterLevelForElement: (@Sendable (Element) -> Int)?
+    @usableFromInline
+    let _low: Int
 
-    /// Initializes a new ``_WatermarkBackPressureStrategy``.
-    ///
-    /// - Parameters:
-    ///   - low: The low watermark where demand should start.
-    ///   - high: The high watermark where demand should be stopped.
+    /// The high watermark where demand should be stopped.
+    @usableFromInline
+    let _high: Int
+
+    /// The current watermark level.
+    @usableFromInline
+    var _currentWatermark: Int = 0
+
+    /// A closure that can be used to calculate the watermark impact of a single element
+    @usableFromInline
+    let _waterLevelForElement: (@Sendable (Element) -> Int)?
+
+    @usableFromInline
+    var description: String {
+        "watermark(\(self._currentWatermark))"
+    }
+
     init(low: Int, high: Int, waterLevelForElement: (@Sendable (Element) -> Int)?) {
         precondition(low <= high)
-        self.low = low
-        self.high = high
-        self.waterLevelForElement = waterLevelForElement
+        self._low = low
+        self._high = high
+        self._waterLevelForElement = waterLevelForElement
     }
 
-    mutating func didYield(elements: Deque<Element>.SubSequence) -> Bool {
-        if let waterLevelForElement {
-            self.currentWatermark += elements.reduce(0) { $0 + waterLevelForElement($1) }
+    @inlinable
+    mutating func didSend(elements: Deque<Element>.SubSequence) -> Bool {
+        if let waterLevelForElement = self._waterLevelForElement {
+            self._currentWatermark += elements.reduce(0) { $0 + waterLevelForElement($1) }
         } else {
-            self.currentWatermark += elements.count
+            self._currentWatermark += elements.count
         }
-        precondition(self.currentWatermark >= 0)
+        precondition(self._currentWatermark >= 0)
         // We are demanding more until we reach the high watermark
-        return self.currentWatermark < self.high
+        return self._currentWatermark < self._high
     }
 
+    @inlinable
     mutating func didConsume(element: Element) -> Bool {
-        if let waterLevelForElement {
-            self.currentWatermark -= waterLevelForElement(element)
+        if let waterLevelForElement = self._waterLevelForElement {
+            self._currentWatermark -= waterLevelForElement(element)
         } else {
-            self.currentWatermark -= 1
+            self._currentWatermark -= 1
         }
-        precondition(self.currentWatermark >= 0)
+        precondition(self._currentWatermark >= 0)
         // We start demanding again once we are below the low watermark
-        return self.currentWatermark < self.low
+        return self._currentWatermark < self._low
     }
 }
 
-enum _AsyncBackPressuredStreamInternalBackPressureStrategy<Element> {
-    case watermark(_AsyncBackPressuredStreamWatermarkBackPressureStrategy<Element>)
+@usableFromInline
+struct _MultiProducerSingleConsumerChannelUnboundedBackpressureStrategy<Element>: Sendable, CustomStringConvertible {
+    @usableFromInline
+    var description: String {
+        return "unbounded"
+    }
 
-    mutating func didYield(elements: Deque<Element>.SubSequence) -> Bool {
+    init() { }
+
+    @inlinable
+    mutating func didSend(elements: Deque<Element>.SubSequence) -> Bool {
+        return true
+    }
+
+    @inlinable
+    mutating func didConsume(element: Element) -> Bool {
+        return true
+    }
+}
+
+@usableFromInline
+enum _MultiProducerSingleConsumerChannelInternalBackpressureStrategy<Element>: Sendable, CustomStringConvertible {
+    /// A watermark based strategy.
+    case watermark(_MultiProducerSingleConsumerChannelWatermarkBackpressureStrategy<Element>)
+    /// An unbounded based strategy.
+    case unbounded(_MultiProducerSingleConsumerChannelUnboundedBackpressureStrategy<Element>)
+
+    @usableFromInline
+    var description: String {
+        switch self {
+        case .watermark(let strategy):
+            return strategy.description
+        case .unbounded(let unbounded):
+            return unbounded.description
+        }
+    }
+
+    @inlinable
+    mutating func didSend(elements: Deque<Element>.SubSequence) -> Bool {
         switch self {
         case .watermark(var strategy):
-            let result = strategy.didYield(elements: elements)
+            let result = strategy.didSend(elements: elements)
             self = .watermark(strategy)
+            return result
+        case .unbounded(var strategy):
+            let result = strategy.didSend(elements: elements)
+            self = .unbounded(strategy)
             return result
         }
     }
 
+    @inlinable
     mutating func didConsume(element: Element) -> Bool {
         switch self {
         case .watermark(var strategy):
             let result = strategy.didConsume(element: element)
             self = .watermark(strategy)
             return result
+        case .unbounded(var strategy):
+            let result = strategy.didConsume(element: element)
+            self = .unbounded(strategy)
+            return result
         }
     }
 }
 
-// We are unchecked Sendable since we are protecting our state with a lock.
-final class _AsyncBackPressuredStreamBackPressuredStorage<Element, Failure: Error>: @unchecked Sendable {
+@usableFromInline
+final class _MultiProducerSingleConsumerChannelBackpressuredStorage<Element, Failure: Error> {
     /// The state machine
-    var _stateMachine: ManagedCriticalState<_AsyncBackPressuredStateMachine<Element, Failure>>
+    @usableFromInline
+    var _stateMachine: ManagedCriticalState<_MultiProducerSingleConsumerStateMachine<Element, Failure>>
 
     var onTermination: (@Sendable () -> Void)? {
         set {
@@ -95,9 +152,9 @@ final class _AsyncBackPressuredStreamBackPressuredStorage<Element, Failure: Erro
     }
 
     init(
-        backPressureStrategy: _AsyncBackPressuredStreamInternalBackPressureStrategy<Element>
+        backpressureStrategy: _MultiProducerSingleConsumerChannelInternalBackpressureStrategy<Element>
     ) {
-        self._stateMachine = .init(.init(backPressureStrategy: backPressureStrategy))
+        self._stateMachine = .init(.init(backpressureStrategy: backpressureStrategy))
     }
 
     func sequenceDeinitialized() {
@@ -111,7 +168,7 @@ final class _AsyncBackPressuredStreamBackPressuredStorage<Element, Failure: Erro
 
         case .failProducersAndCallOnTermination(let producerContinuations, let onTermination):
             for producerContinuation in producerContinuations {
-                producerContinuation(.failure(AsyncBackPressuredStreamAlreadyFinishedError()))
+                producerContinuation(.failure(MultiProducerSingleConsumerChannelAlreadyFinishedError()))
             }
             onTermination?()
 
@@ -137,7 +194,7 @@ final class _AsyncBackPressuredStreamBackPressuredStorage<Element, Failure: Erro
 
         case .failProducersAndCallOnTermination(let producerContinuations, let onTermination):
             for producerContinuation in producerContinuations {
-                producerContinuation(.failure(AsyncBackPressuredStreamAlreadyFinishedError()))
+                producerContinuation(.failure(MultiProducerSingleConsumerChannelAlreadyFinishedError()))
             }
             onTermination?()
 
@@ -157,13 +214,13 @@ final class _AsyncBackPressuredStreamBackPressuredStorage<Element, Failure: Erro
 
         case .failProducersAndCallOnTermination(let producerContinuations, let onTermination):
             for producerContinuation in producerContinuations {
-                producerContinuation(.failure(AsyncBackPressuredStreamAlreadyFinishedError()))
+                producerContinuation(.failure(MultiProducerSingleConsumerChannelAlreadyFinishedError()))
             }
             onTermination?()
 
         case .failProducers(let producerContinuations):
             for producerContinuation in producerContinuations {
-                producerContinuation(.failure(AsyncBackPressuredStreamAlreadyFinishedError()))
+                producerContinuation(.failure(MultiProducerSingleConsumerChannelAlreadyFinishedError()))
             }
 
         case .none:
@@ -171,11 +228,12 @@ final class _AsyncBackPressuredStreamBackPressuredStorage<Element, Failure: Erro
         }
     }
 
-    func write(
+    @inlinable
+    func send(
         contentsOf sequence: some Sequence<Element>
-    ) throws -> AsyncBackPressuredStream<Element, Failure>.Source.WriteResult {
+    ) throws -> MultiProducerSingleConsumerChannel<Element, Failure>.Source.SendResult {
         let action = self._stateMachine.withCriticalRegion {
-            return $0.write(sequence)
+            return $0.send(sequence)
         }
 
         switch action {
@@ -183,7 +241,7 @@ final class _AsyncBackPressuredStreamBackPressuredStorage<Element, Failure: Erro
             return .produceMore
 
         case .returnEnqueue(let callbackToken):
-            return .enqueueCallback(callbackToken)
+            return .enqueueCallback(.init(id: callbackToken))
 
         case .resumeConsumerAndReturnProduceMore(let continuation, let element):
             continuation.resume(returning: element)
@@ -191,15 +249,16 @@ final class _AsyncBackPressuredStreamBackPressuredStorage<Element, Failure: Erro
 
         case .resumeConsumerAndReturnEnqueue(let continuation, let element, let callbackToken):
             continuation.resume(returning: element)
-            return .enqueueCallback(callbackToken)
+            return .enqueueCallback(.init(id: callbackToken))
 
         case .throwFinishedError:
-            throw AsyncBackPressuredStreamAlreadyFinishedError()
+            throw MultiProducerSingleConsumerChannelAlreadyFinishedError()
         }
     }
 
+    @inlinable
     func enqueueProducer(
-        callbackToken: AsyncBackPressuredStream<Element, Failure>.Source.WriteResult.CallbackToken,
+        callbackToken: UInt64,
         onProduceMore: @escaping @Sendable (Result<Void, Error>) -> Void
     ) {
         let action = self._stateMachine.withCriticalRegion {
@@ -218,8 +277,9 @@ final class _AsyncBackPressuredStreamBackPressuredStorage<Element, Failure: Erro
         }
     }
 
+    @inlinable
     func cancelProducer(
-        callbackToken: AsyncBackPressuredStream<Element, Failure>.Source.WriteResult.CallbackToken
+        callbackToken: UInt64
     ) {
         let action = self._stateMachine.withCriticalRegion {
             $0.cancelProducer(callbackToken: callbackToken)
@@ -234,6 +294,7 @@ final class _AsyncBackPressuredStreamBackPressuredStorage<Element, Failure: Erro
         }
     }
 
+    @inlinable
     func finish(_ failure: Failure?) {
         let action = self._stateMachine.withCriticalRegion {
             $0.finish(failure)
@@ -255,7 +316,7 @@ final class _AsyncBackPressuredStreamBackPressuredStorage<Element, Failure: Erro
 
         case .resumeProducers(let producerContinuations):
             for producerContinuation in producerContinuations {
-                producerContinuation(.failure(AsyncBackPressuredStreamAlreadyFinishedError()))
+                producerContinuation(.failure(MultiProducerSingleConsumerChannelAlreadyFinishedError()))
             }
 
         case .none:
@@ -263,6 +324,43 @@ final class _AsyncBackPressuredStreamBackPressuredStorage<Element, Failure: Erro
         }
     }
 
+    #if compiler(>=6.0)
+    @inlinable
+    func next(isolation actor: isolated (any Actor)?) async throws -> Element? {
+        let action = self._stateMachine.withCriticalRegion {
+            $0.next()
+        }
+
+        switch action {
+        case .returnElement(let element):
+            return element
+
+        case .returnElementAndResumeProducers(let element, let producerContinuations):
+            for producerContinuation in producerContinuations {
+                producerContinuation(Result<Void, Error>.success(()))
+            }
+
+            return element
+
+        case .returnFailureAndCallOnTermination(let failure, let onTermination):
+            onTermination?()
+            switch failure {
+            case .some(let error):
+                throw error
+
+            case .none:
+                return nil
+            }
+
+        case .returnNil:
+            return nil
+
+        case .suspendTask:
+            return try await self.suspendNext(isolation: actor)
+        }
+    }
+    #else
+    @inlinable
     func next() async throws -> Element? {
         let action = self._stateMachine.withCriticalRegion {
             $0.next()
@@ -296,10 +394,13 @@ final class _AsyncBackPressuredStreamBackPressuredStorage<Element, Failure: Erro
             return try await self.suspendNext()
         }
     }
+    #endif
 
-    func suspendNext() async throws -> Element? {
+    #if compiler(>=6.0)
+    @inlinable
+    func suspendNext(isolation actor: isolated (any Actor)?) async throws -> Element? {
         return try await withTaskCancellationHandler {
-            return try await withCheckedThrowingContinuation { continuation in
+            return try await withUnsafeThrowingContinuation { continuation in
                 let action = self._stateMachine.withCriticalRegion {
                     $0.suspendNext(continuation: continuation)
                 }
@@ -343,7 +444,7 @@ final class _AsyncBackPressuredStreamBackPressuredStorage<Element, Failure: Erro
 
             case .failProducersAndCallOnTermination(let producerContinuations, let onTermination):
                 for producerContinuation in producerContinuations {
-                    producerContinuation(.failure(AsyncBackPressuredStreamAlreadyFinishedError()))
+                    producerContinuation(.failure(MultiProducerSingleConsumerChannelAlreadyFinishedError()))
                 }
                 onTermination?()
 
@@ -352,70 +453,75 @@ final class _AsyncBackPressuredStreamBackPressuredStorage<Element, Failure: Erro
             }
         }
     }
+    #else
+    @inlinable
+    func suspendNext() async throws -> Element? {
+        return try await withTaskCancellationHandler {
+            return try await withUnsafeThrowingContinuation { continuation in
+                let action = self._stateMachine.withCriticalRegion {
+                    $0.suspendNext(continuation: continuation)
+                }
+
+                switch action {
+                case .resumeConsumerWithElement(let continuation, let element):
+                    continuation.resume(returning: element)
+
+                case .resumeConsumerWithElementAndProducers(let continuation, let element, let producerContinuations):
+                    continuation.resume(returning: element)
+                    for producerContinuation in producerContinuations {
+                        producerContinuation(Result<Void, Error>.success(()))
+                    }
+
+                case .resumeConsumerWithFailureAndCallOnTermination(let continuation, let failure, let onTermination):
+                    switch failure {
+                    case .some(let error):
+                        continuation.resume(throwing: error)
+
+                    case .none:
+                        continuation.resume(returning: nil)
+                    }
+                    onTermination?()
+
+                case .resumeConsumerWithNil(let continuation):
+                    continuation.resume(returning: nil)
+
+                case .none:
+                    break
+                }
+            }
+        } onCancel: {
+            let action = self._stateMachine.withCriticalRegion {
+                $0.cancelNext()
+            }
+
+            switch action {
+            case .resumeConsumerWithNilAndCallOnTermination(let continuation, let onTermination):
+                continuation.resume(returning: nil)
+                onTermination?()
+
+            case .failProducersAndCallOnTermination(let producerContinuations, let onTermination):
+                for producerContinuation in producerContinuations {
+                    producerContinuation(.failure(MultiProducerSingleConsumerChannelAlreadyFinishedError()))
+                }
+                onTermination?()
+
+            case .none:
+                break
+            }
+        }
+    }
+    #endif
 }
 
-/// The state machine of the backpressured async stream.
-struct _AsyncBackPressuredStateMachine<Element, Failure: Error>: Sendable {
-    enum _State {
-        struct Initial {
-            /// The backpressure strategy.
-            var backPressureStrategy: _AsyncBackPressuredStreamInternalBackPressureStrategy<Element>
-            /// Indicates if the iterator was initialized.
-            var iteratorInitialized: Bool
-            /// The onTermination callback.
-            var onTermination: (@Sendable () -> Void)?
-        }
-
-        struct Streaming {
-            /// The backpressure strategy.
-            var backPressureStrategy: _AsyncBackPressuredStreamInternalBackPressureStrategy<Element>
-            /// Indicates if the iterator was initialized.
-            var iteratorInitialized: Bool
-            /// The onTermination callback.
-            var onTermination: (@Sendable () -> Void)?
-            /// The buffer of elements.
-            var buffer: Deque<Element>
-            /// The optional consumer continuation.
-            var consumerContinuation: CheckedContinuation<Element?, Error>?
-            /// The producer continuations.
-            var producerContinuations: Deque<(UInt, (Result<Void, Error>) -> Void)>
-            /// The producers that have been cancelled.
-            var cancelledAsyncProducers: Deque<UInt>
-            /// Indicates if we currently have outstanding demand.
-            var hasOutstandingDemand: Bool
-        }
-
-        struct SourceFinished {
-            /// Indicates if the iterator was initialized.
-            var iteratorInitialized: Bool
-            /// The buffer of elements.
-            var buffer: Deque<Element>
-            /// The failure that should be thrown after the last element has been consumed.
-            var failure: Failure?
-            /// The onTermination callback.
-            var onTermination: (@Sendable () -> Void)?
-        }
-
-        case initial(Initial)
-        /// The state once either any element was yielded or `next()` was called.
-        case streaming(Streaming)
-        /// The state once the underlying source signalled that it is finished.
-        case sourceFinished(SourceFinished)
-
-        /// The state once there can be no outstanding demand. This can happen if:
-        /// 1. The iterator was deinited
-        /// 2. The underlying source finished and all buffered elements have been consumed
-        case finished(iteratorInitialized: Bool)
-
-        /// An intermediate state to avoid CoWs.
-        case modify
-    }
-
+/// The state machine of the channel.
+@usableFromInline
+struct _MultiProducerSingleConsumerStateMachine<Element, Failure: Error> {
     /// The state machine's current state.
-    var _state: _State
+    @usableFromInline
+    var _state: _MultiProducerSingleConsumerState<Element, Failure>
 
     // The ID used for the next CallbackToken.
-    var nextCallbackTokenID: UInt = 0
+    var _nextCallbackTokenID: UInt64 = 0
 
     var _onTermination: (@Sendable () -> Void)? {
         set {
@@ -424,9 +530,9 @@ struct _AsyncBackPressuredStateMachine<Element, Failure: Error>: Sendable {
                 initial.onTermination = newValue
                 self._state = .initial(initial)
 
-            case .streaming(var streaming):
-                streaming.onTermination = newValue
-                self._state = .streaming(streaming)
+            case .channeling(var channeling):
+                channeling.onTermination = newValue
+                self._state = .channeling(channeling)
 
             case .sourceFinished(var sourceFinished):
                 sourceFinished.onTermination = newValue
@@ -436,7 +542,7 @@ struct _AsyncBackPressuredStateMachine<Element, Failure: Error>: Sendable {
                 break
 
             case .modify:
-                fatalError("AsyncStream internal inconsistency")
+                fatalError("MultiProducerSingleConsumerChannel internal inconsistency")
             }
         }
         get {
@@ -444,8 +550,8 @@ struct _AsyncBackPressuredStateMachine<Element, Failure: Error>: Sendable {
             case .initial(let initial):
                 return initial.onTermination
 
-            case .streaming(let streaming):
-                return streaming.onTermination
+            case .channeling(let channeling):
+                return channeling.onTermination
 
             case .sourceFinished(let sourceFinished):
                 return sourceFinished.onTermination
@@ -454,23 +560,23 @@ struct _AsyncBackPressuredStateMachine<Element, Failure: Error>: Sendable {
                 return nil
 
             case .modify:
-                fatalError("AsyncStream internal inconsistency")
+                fatalError("MultiProducerSingleConsumerChannel internal inconsistency")
             }
         }
     }
 
     /// Initializes a new `StateMachine`.
     ///
-    /// We are passing and holding the back-pressure strategy here because
+    /// We are passing and holding the backpressure strategy here because
     /// it is a customizable extension of the state machine.
     ///
-    /// - Parameter backPressureStrategy: The back-pressure strategy.
+    /// - Parameter backpressureStrategy: The backpressure strategy.
     init(
-        backPressureStrategy: _AsyncBackPressuredStreamInternalBackPressureStrategy<Element>
+        backpressureStrategy: _MultiProducerSingleConsumerChannelInternalBackpressureStrategy<Element>
     ) {
         self._state = .initial(
             .init(
-                backPressureStrategy: backPressureStrategy,
+                backpressureStrategy: backpressureStrategy,
                 iteratorInitialized: false,
                 onTermination: nil
             )
@@ -478,29 +584,32 @@ struct _AsyncBackPressuredStateMachine<Element, Failure: Error>: Sendable {
     }
 
     /// Generates the next callback token.
-    mutating func nextCallbackToken() -> AsyncBackPressuredStream<Element, Failure>.Source.WriteResult.CallbackToken {
-        let id = self.nextCallbackTokenID
-        self.nextCallbackTokenID += 1
-        return .init(id: id)
+    @usableFromInline
+    mutating func nextCallbackToken() -> UInt64 {
+        let id = self._nextCallbackTokenID
+        self._nextCallbackTokenID += 1
+        return id
     }
 
     /// Actions returned by `sequenceDeinitialized()`.
+    @usableFromInline
     enum SequenceDeinitializedAction {
         /// Indicates that `onTermination` should be called.
         case callOnTermination((@Sendable () -> Void)?)
-        /// Indicates that  all producers should be failed and `onTermination` should be called.
+        /// Indicates that all producers should be failed and `onTermination` should be called.
         case failProducersAndCallOnTermination(
-            [(Result<Void, Error>) -> Void],
+            _TinyArray<(Result<Void, Error>) -> Void>,
             (@Sendable () -> Void)?
         )
     }
 
+    @inlinable
     mutating func sequenceDeinitialized() -> SequenceDeinitializedAction? {
         switch self._state {
         case .initial(let initial):
             guard initial.iteratorInitialized else {
                 // No iterator was created so we can transition to finished right away.
-                self._state = .finished(iteratorInitialized: false)
+                self._state = .finished(.init(iteratorInitialized: false, sourceFinished: false))
 
                 return .callOnTermination(initial.onTermination)
             }
@@ -508,14 +617,14 @@ struct _AsyncBackPressuredStateMachine<Element, Failure: Error>: Sendable {
             // This is an expected pattern and we just continue on normal.
             return .none
 
-        case .streaming(let streaming):
-            guard streaming.iteratorInitialized else {
+        case .channeling(let channeling):
+            guard channeling.iteratorInitialized else {
                 // No iterator was created so we can transition to finished right away.
-                self._state = .finished(iteratorInitialized: false)
+                self._state = .finished(.init(iteratorInitialized: false, sourceFinished: false))
 
                 return .failProducersAndCallOnTermination(
-                    Array(streaming.producerContinuations.map { $0.1 }),
-                    streaming.onTermination
+                    .init(channeling.producerContinuations.lazy.map { $0.1 }),
+                    channeling.onTermination
                 )
             }
             // An iterator was created and we deinited the sequence.
@@ -525,7 +634,7 @@ struct _AsyncBackPressuredStateMachine<Element, Failure: Error>: Sendable {
         case .sourceFinished(let sourceFinished):
             guard sourceFinished.iteratorInitialized else {
                 // No iterator was created so we can transition to finished right away.
-                self._state = .finished(iteratorInitialized: false)
+                self._state = .finished(.init(iteratorInitialized: false, sourceFinished: true))
 
                 return .callOnTermination(sourceFinished.onTermination)
             }
@@ -539,10 +648,11 @@ struct _AsyncBackPressuredStateMachine<Element, Failure: Error>: Sendable {
             return .none
 
         case .modify:
-            fatalError("AsyncStream internal inconsistency")
+            fatalError("MultiProducerSingleConsumerChannel internal inconsistency")
         }
     }
 
+    @inlinable
     mutating func iteratorInitialized() {
         switch self._state {
         case .initial(var initial):
@@ -555,14 +665,14 @@ struct _AsyncBackPressuredStateMachine<Element, Failure: Error>: Sendable {
                 self._state = .initial(initial)
             }
 
-        case .streaming(var streaming):
-            if streaming.iteratorInitialized {
+        case .channeling(var channeling):
+            if channeling.iteratorInitialized {
                 // Our sequence is a unicast sequence and does not support multiple AsyncIterator's
                 fatalError("Only a single AsyncIterator can be created")
             } else {
                 // The first and only iterator was initialized.
-                streaming.iteratorInitialized = true
-                self._state = .streaming(streaming)
+                channeling.iteratorInitialized = true
+                self._state = .channeling(channeling)
             }
 
         case .sourceFinished(var sourceFinished):
@@ -575,69 +685,69 @@ struct _AsyncBackPressuredStateMachine<Element, Failure: Error>: Sendable {
                 self._state = .sourceFinished(sourceFinished)
             }
 
-        case .finished(iteratorInitialized: true):
-            // Our sequence is a unicast sequence and does not support multiple AsyncIterator's
-            fatalError("Only a single AsyncIterator can be created")
-
-        case .finished(iteratorInitialized: false):
-            // It is strange that an iterator is created after we are finished
-            // but it can definitely happen, e.g.
-            // Sequence.init -> source.finish -> sequence.makeAsyncIterator
-            self._state = .finished(iteratorInitialized: true)
+        case .finished(let finished):
+            if finished.iteratorInitialized {
+                // Our sequence is a unicast sequence and does not support multiple AsyncIterator's
+                fatalError("Only a single AsyncIterator can be created")
+            } else {
+                self._state = .finished(.init(iteratorInitialized: true, sourceFinished: finished.sourceFinished))
+            }
 
         case .modify:
-            fatalError("AsyncStream internal inconsistency")
+            fatalError("MultiProducerSingleConsumerChannel internal inconsistency")
         }
     }
 
     /// Actions returned by `iteratorDeinitialized()`.
+    @usableFromInline
     enum IteratorDeinitializedAction {
         /// Indicates that `onTermination` should be called.
         case callOnTermination((@Sendable () -> Void)?)
         /// Indicates that  all producers should be failed and `onTermination` should be called.
         case failProducersAndCallOnTermination(
-            [(Result<Void, Error>) -> Void],
+            _TinyArray<(Result<Void, Error>) -> Void>,
             (@Sendable () -> Void)?
         )
     }
 
+    @inlinable
     mutating func iteratorDeinitialized() -> IteratorDeinitializedAction? {
         switch self._state {
         case .initial(let initial):
             if initial.iteratorInitialized {
                 // An iterator was created and deinited. Since we only support
                 // a single iterator we can now transition to finish.
-                self._state = .finished(iteratorInitialized: true)
+                self._state = .finished(.init(iteratorInitialized: true, sourceFinished: false))
                 return .callOnTermination(initial.onTermination)
             } else {
                 // An iterator needs to be initialized before it can be deinitialized.
-                fatalError("AsyncStream internal inconsistency")
+                fatalError("MultiProducerSingleConsumerChannel internal inconsistency")
             }
 
-        case .streaming(let streaming):
-            if streaming.iteratorInitialized {
+        case .channeling(let channeling):
+            if channeling.iteratorInitialized {
                 // An iterator was created and deinited. Since we only support
                 // a single iterator we can now transition to finish.
-                self._state = .finished(iteratorInitialized: true)
+                self._state = .finished(.init(iteratorInitialized: true, sourceFinished: false))
 
                 return .failProducersAndCallOnTermination(
-                    Array(streaming.producerContinuations.map { $0.1 }),
-                    streaming.onTermination
+                    .init(channeling.producerContinuations.lazy.map { $0.1 }),
+                    channeling.onTermination
                 )
             } else {
                 // An iterator needs to be initialized before it can be deinitialized.
-                fatalError("AsyncStream internal inconsistency")
+                fatalError("MultiProducerSingleConsumerChannel internal inconsistency")
             }
 
         case .sourceFinished(let sourceFinished):
             if sourceFinished.iteratorInitialized {
                 // An iterator was created and deinited. Since we only support
                 // a single iterator we can now transition to finish.
-                self._state = .finished(iteratorInitialized: true)
+                self._state = .finished(.init(iteratorInitialized: true, sourceFinished: true))
                 return .callOnTermination(sourceFinished.onTermination)
             } else {
                 // An iterator needs to be initialized before it can be deinitialized.
-                fatalError("AsyncStream internal inconsistency")
+                fatalError("MultiProducerSingleConsumerChannel internal inconsistency")
             }
 
         case .finished:
@@ -646,90 +756,74 @@ struct _AsyncBackPressuredStateMachine<Element, Failure: Error>: Sendable {
             return .none
 
         case .modify:
-            fatalError("AsyncStream internal inconsistency")
+            fatalError("MultiProducerSingleConsumerChannel internal inconsistency")
         }
     }
 
     /// Actions returned by `sourceDeinitialized()`.
+    @usableFromInline
     enum SourceDeinitializedAction {
         /// Indicates that `onTermination` should be called.
         case callOnTermination((() -> Void)?)
-        /// Indicates that  all producers should be failed and `onTermination` should be called.
+        /// Indicates that all producers should be failed and `onTermination` should be called.
         case failProducersAndCallOnTermination(
-            [(Result<Void, Error>) -> Void],
+            _TinyArray<(Result<Void, Error>) -> Void>,
             (@Sendable () -> Void)?
         )
         /// Indicates that all producers should be failed.
-        case failProducers([(Result<Void, Error>) -> Void])
+        case failProducers(_TinyArray<(Result<Void, Error>) -> Void>)
     }
 
+    @inlinable
     mutating func sourceDeinitialized() -> SourceDeinitializedAction? {
         switch self._state {
-        case .initial(let initial):
-            // The source got deinited before anything was written
-            self._state = .finished(iteratorInitialized: initial.iteratorInitialized)
-            return .callOnTermination(initial.onTermination)
+        case .initial, .channeling:
+            fatalError("The channel's source hasn't been finished but deinited")
 
-        case .streaming(let streaming):
-            guard streaming.buffer.isEmpty else {
-                // The continuation must be `nil` if the buffer has elements
-                precondition(streaming.consumerContinuation == nil)
-
-                self._state = .sourceFinished(
-                    .init(
-                        iteratorInitialized: streaming.iteratorInitialized,
-                        buffer: streaming.buffer,
-                        failure: nil,
-                        onTermination: streaming.onTermination
-                    )
-                )
-
-                return .failProducers(
-                    Array(streaming.producerContinuations.map { $0.1 })
-                )
-            }
-            // We can transition to finished right away since the buffer is empty now
-            self._state = .finished(iteratorInitialized: streaming.iteratorInitialized)
-
-            return .failProducersAndCallOnTermination(
-                Array(streaming.producerContinuations.map { $0.1 }),
-                streaming.onTermination
-            )
-
-        case .sourceFinished, .finished:
-            // This is normal and we just have to tolerate it
+        case .sourceFinished:
+            // This is the expected case where finish was called and then the source deinited
             return .none
 
+        case .finished(let finished):
+            if finished.sourceFinished {
+                // The source already got finished so this is fine.
+                return .none
+            } else {
+                fatalError("The channel's source hasn't been finished but deinited")
+            }
+
         case .modify:
-            fatalError("AsyncStream internal inconsistency")
+            fatalError("MultiProducerSingleConsumerChannel internal inconsistency")
         }
     }
 
-    /// Actions returned by `write()`.
-    enum WriteAction {
+    /// Actions returned by `send()`.
+    @usableFromInline
+    enum SendAction {
         /// Indicates that the producer should be notified to produce more.
         case returnProduceMore
         /// Indicates that the producer should be suspended to stop producing.
         case returnEnqueue(
-            callbackToken: AsyncBackPressuredStream<Element, Failure>.Source.WriteResult.CallbackToken
+            callbackToken: UInt64
         )
         /// Indicates that the consumer should be resumed and the producer should be notified to produce more.
         case resumeConsumerAndReturnProduceMore(
-            continuation: CheckedContinuation<Element?, Error>,
+            continuation: UnsafeContinuation<Element?, Error>,
             element: Element
         )
         /// Indicates that the consumer should be resumed and the producer should be suspended.
         case resumeConsumerAndReturnEnqueue(
-            continuation: CheckedContinuation<Element?, Error>,
+            continuation: UnsafeContinuation<Element?, Error>,
             element: Element,
-            callbackToken: AsyncBackPressuredStream<Element, Failure>.Source.WriteResult.CallbackToken
+            callbackToken: UInt64
         )
         /// Indicates that the producer has been finished.
         case throwFinishedError
 
+        @inlinable
         init(
-            callbackToken: AsyncBackPressuredStream<Element, Failure>.Source.WriteResult.CallbackToken?,
-            continuationAndElement: (CheckedContinuation<Element?, Error>, Element)? = nil
+            callbackToken: UInt64?,
+            continuationAndElement: (UnsafeContinuation<Element?, Error>, Element)? = nil
         ) {
             switch (callbackToken, continuationAndElement) {
             case (.none, .none):
@@ -754,18 +848,19 @@ struct _AsyncBackPressuredStateMachine<Element, Failure: Error>: Sendable {
         }
     }
 
-    mutating func write(_ sequence: some Sequence<Element>) -> WriteAction {
+    @inlinable
+    mutating func send(_ sequence: some Sequence<Element>) -> SendAction {
         switch self._state {
         case .initial(var initial):
             var buffer = Deque<Element>()
             buffer.append(contentsOf: sequence)
 
-            let shouldProduceMore = initial.backPressureStrategy.didYield(elements: buffer[...])
+            let shouldProduceMore = initial.backpressureStrategy.didSend(elements: buffer[...])
             let callbackToken = shouldProduceMore ? nil : self.nextCallbackToken()
 
-            self._state = .streaming(
+            self._state = .channeling(
                 .init(
-                    backPressureStrategy: initial.backPressureStrategy,
+                    backpressureStrategy: initial.backpressureStrategy,
                     iteratorInitialized: initial.iteratorInitialized,
                     onTermination: initial.onTermination,
                     buffer: buffer,
@@ -778,37 +873,38 @@ struct _AsyncBackPressuredStateMachine<Element, Failure: Error>: Sendable {
 
             return .init(callbackToken: callbackToken)
 
-        case .streaming(var streaming):
+        case .channeling(var channeling):
             self._state = .modify
 
             // We have an element and can resume the continuation
-            let bufferEndIndexBeforeAppend = streaming.buffer.endIndex
-            streaming.buffer.append(contentsOf: sequence)
-            let shouldProduceMore = streaming.backPressureStrategy.didYield(
-                elements: streaming.buffer[bufferEndIndexBeforeAppend...]
+            let bufferEndIndexBeforeAppend = channeling.buffer.endIndex
+            channeling.buffer.append(contentsOf: sequence)
+            var shouldProduceMore = channeling.backpressureStrategy.didSend(
+                elements: channeling.buffer[bufferEndIndexBeforeAppend...]
             )
-            streaming.hasOutstandingDemand = shouldProduceMore
-            let callbackToken = shouldProduceMore ? nil : self.nextCallbackToken()
+            channeling.hasOutstandingDemand = shouldProduceMore
 
-            guard let consumerContinuation = streaming.consumerContinuation else {
+            guard let consumerContinuation = channeling.consumerContinuation else {
                 // We don't have a suspended consumer so we just buffer the elements
-                self._state = .streaming(streaming)
+                self._state = .channeling(channeling)
                 return .init(
-                    callbackToken: callbackToken
+                    callbackToken: shouldProduceMore ? nil : self.nextCallbackToken()
                 )
             }
-            guard let element = streaming.buffer.popFirst() else {
-                // We got a yield of an empty sequence. We just tolerate this.
-                self._state = .streaming(streaming)
-
-                return .init(callbackToken: callbackToken)
+            guard let element = channeling.buffer.popFirst() else {
+                // We got a send of an empty sequence. We just tolerate this.
+                self._state = .channeling(channeling)
+                return .init(callbackToken: shouldProduceMore ? nil : self.nextCallbackToken())
             }
+            // We need to tell the back pressure strategy that we consumed
+            shouldProduceMore = channeling.backpressureStrategy.didConsume(element: element)
+            channeling.hasOutstandingDemand = shouldProduceMore
 
             // We got a consumer continuation and an element. We can resume the consumer now
-            streaming.consumerContinuation = nil
-            self._state = .streaming(streaming)
+            channeling.consumerContinuation = nil
+            self._state = .channeling(channeling)
             return .init(
-                callbackToken: callbackToken,
+                callbackToken: shouldProduceMore ? nil : self.nextCallbackToken(),
                 continuationAndElement: (consumerContinuation, element)
             )
 
@@ -817,11 +913,12 @@ struct _AsyncBackPressuredStateMachine<Element, Failure: Error>: Sendable {
             return .throwFinishedError
 
         case .modify:
-            fatalError("AsyncStream internal inconsistency")
+            fatalError("MultiProducerSingleConsumerChannel internal inconsistency")
         }
     }
 
     /// Actions returned by `enqueueProducer()`.
+    @usableFromInline
     enum EnqueueProducerAction {
         /// Indicates that the producer should be notified to produce more.
         case resumeProducer((Result<Void, Error>) -> Void)
@@ -829,101 +926,102 @@ struct _AsyncBackPressuredStateMachine<Element, Failure: Error>: Sendable {
         case resumeProducerWithError((Result<Void, Error>) -> Void, Error)
     }
 
+    @inlinable
     mutating func enqueueProducer(
-        callbackToken: AsyncBackPressuredStream<Element, Failure>.Source.WriteResult.CallbackToken,
+        callbackToken: UInt64,
         onProduceMore: @Sendable @escaping (Result<Void, Error>) -> Void
     ) -> EnqueueProducerAction? {
         switch self._state {
         case .initial:
-            // We need to transition to streaming before we can suspend
-            // This is enforced because the CallbackToken has no public init so
-            // one must create it by calling `write` first.
-            fatalError("AsyncStream internal inconsistency")
+            fatalError("MultiProducerSingleConsumerChannel internal inconsistency")
 
-        case .streaming(var streaming):
-            if let index = streaming.cancelledAsyncProducers.firstIndex(of: callbackToken.id) {
+        case .channeling(var channeling):
+            if let index = channeling.cancelledAsyncProducers.firstIndex(of: callbackToken) {
                 // Our producer got marked as cancelled.
                 self._state = .modify
-                streaming.cancelledAsyncProducers.remove(at: index)
-                self._state = .streaming(streaming)
+                channeling.cancelledAsyncProducers.remove(at: index)
+                self._state = .channeling(channeling)
 
                 return .resumeProducerWithError(onProduceMore, CancellationError())
-            } else if streaming.hasOutstandingDemand {
+            } else if channeling.hasOutstandingDemand {
                 // We hit an edge case here where we wrote but the consuming thread got interleaved
                 return .resumeProducer(onProduceMore)
             } else {
                 self._state = .modify
-                streaming.producerContinuations.append((callbackToken.id, onProduceMore))
+                channeling.producerContinuations.append((callbackToken, onProduceMore))
 
-                self._state = .streaming(streaming)
+                self._state = .channeling(channeling)
                 return .none
             }
 
         case .sourceFinished, .finished:
-            // Since we are unlocking between yielding and suspending the yield
+            // Since we are unlocking between sending elements and suspending the send
             // It can happen that the source got finished or the consumption fully finishes.
-            return .resumeProducerWithError(onProduceMore, AsyncBackPressuredStreamAlreadyFinishedError())
+            return .resumeProducerWithError(onProduceMore, MultiProducerSingleConsumerChannelAlreadyFinishedError())
 
         case .modify:
-            fatalError("AsyncStream internal inconsistency")
+            fatalError("MultiProducerSingleConsumerChannel internal inconsistency")
         }
     }
 
     /// Actions returned by `cancelProducer()`.
+    @usableFromInline
     enum CancelProducerAction {
         /// Indicates that the producer should be notified about cancellation.
         case resumeProducerWithCancellationError((Result<Void, Error>) -> Void)
     }
 
+    @inlinable
     mutating func cancelProducer(
-        callbackToken: AsyncBackPressuredStream<Element, Failure>.Source.WriteResult.CallbackToken
+        callbackToken: UInt64
     ) -> CancelProducerAction? {
+        //print(#function, self._state.description)
         switch self._state {
         case .initial:
-            // We need to transition to streaming before we can suspend
-            fatalError("AsyncStream internal inconsistency")
+            fatalError("MultiProducerSingleConsumerChannel internal inconsistency")
 
-        case .streaming(var streaming):
-            guard let index = streaming.producerContinuations.firstIndex(where: { $0.0 == callbackToken.id }) else {
-                // The task that yields was cancelled before yielding so the cancellation handler
+        case .channeling(var channeling):
+            guard let index = channeling.producerContinuations.firstIndex(where: { $0.0 == callbackToken }) else {
+                // The task that sends was cancelled before sending elements so the cancellation handler
                 // got invoked right away
                 self._state = .modify
-                streaming.cancelledAsyncProducers.append(callbackToken.id)
-                self._state = .streaming(streaming)
+                channeling.cancelledAsyncProducers.append(callbackToken)
+                self._state = .channeling(channeling)
 
                 return .none
             }
             // We have an enqueued producer that we need to resume now
             self._state = .modify
-            let continuation = streaming.producerContinuations.remove(at: index).1
-            self._state = .streaming(streaming)
+            let continuation = channeling.producerContinuations.remove(at: index).1
+            self._state = .channeling(channeling)
 
             return .resumeProducerWithCancellationError(continuation)
 
         case .sourceFinished, .finished:
-            // Since we are unlocking between yielding and suspending the yield
+            // Since we are unlocking between sending elements and suspending the send
             // It can happen that the source got finished or the consumption fully finishes.
             return .none
 
         case .modify:
-            fatalError("AsyncStream internal inconsistency")
+            fatalError("MultiProducerSingleConsumerChannel internal inconsistency")
         }
     }
 
     /// Actions returned by `finish()`.
+    @usableFromInline
     enum FinishAction {
         /// Indicates that `onTermination` should be called.
         case callOnTermination((() -> Void)?)
         /// Indicates that the consumer  should be resumed with the failure, the producers
         /// should be resumed with an error and `onTermination` should be called.
         case resumeConsumerAndCallOnTermination(
-            consumerContinuation: CheckedContinuation<Element?, Error>,
+            consumerContinuation: UnsafeContinuation<Element?, Error>,
             failure: Failure?,
             onTermination: (() -> Void)?
         )
         /// Indicates that the producers should be resumed with an error.
         case resumeProducers(
-            producerContinuations: [(Result<Void, Error>) -> Void]
+            producerContinuations: _TinyArray<(Result<Void, Error>) -> Void>
         )
     }
 
@@ -931,7 +1029,7 @@ struct _AsyncBackPressuredStateMachine<Element, Failure: Error>: Sendable {
     mutating func finish(_ failure: Failure?) -> FinishAction? {
         switch self._state {
         case .initial(let initial):
-            // Nothing was yielded nor did anybody call next
+            // Nothing was sent nor did anybody call next
             // This means we can transition to sourceFinished and store the failure
             self._state = .sourceFinished(
                 .init(
@@ -944,48 +1042,55 @@ struct _AsyncBackPressuredStateMachine<Element, Failure: Error>: Sendable {
 
             return .callOnTermination(initial.onTermination)
 
-        case .streaming(let streaming):
-            guard let consumerContinuation = streaming.consumerContinuation else {
+        case .channeling(let channeling):
+            guard let consumerContinuation = channeling.consumerContinuation else {
+                // We don't have a suspended consumer so we are just going to mark
+                // the source as finished and terminate the current suspended producers.
                 self._state = .sourceFinished(
                     .init(
-                        iteratorInitialized: streaming.iteratorInitialized,
-                        buffer: streaming.buffer,
+                        iteratorInitialized: channeling.iteratorInitialized,
+                        buffer: channeling.buffer,
                         failure: failure,
-                        onTermination: streaming.onTermination
+                        onTermination: channeling.onTermination
                     )
                 )
 
-                return .resumeProducers(producerContinuations: Array(streaming.producerContinuations.map { $0.1 }))
+                return .resumeProducers(producerContinuations: .init(channeling.producerContinuations.lazy.map { $0.1 }))
             }
             // We have a continuation, this means our buffer must be empty
             // Furthermore, we can now transition to finished
             // and resume the continuation with the failure
-            precondition(streaming.buffer.isEmpty, "Expected an empty buffer")
-            precondition(streaming.producerContinuations.isEmpty, "Expected no suspended producers")
+            precondition(channeling.buffer.isEmpty, "Expected an empty buffer")
 
-            self._state = .finished(iteratorInitialized: streaming.iteratorInitialized)
+            self._state = .finished(.init(iteratorInitialized: channeling.iteratorInitialized, sourceFinished: true))
 
             return .resumeConsumerAndCallOnTermination(
                 consumerContinuation: consumerContinuation,
                 failure: failure,
-                onTermination: streaming.onTermination
+                onTermination: channeling.onTermination
             )
 
-        case .sourceFinished, .finished:
+        case .sourceFinished:
             // If the source has finished, finishing again has no effect.
             return .none
 
+        case .finished(var finished):
+            finished.sourceFinished = true
+            self._state = .finished(finished)
+            return .none
+
         case .modify:
-            fatalError("AsyncStream internal inconsistency")
+            fatalError("MultiProducerSingleConsumerChannel internal inconsistency")
         }
     }
 
     /// Actions returned by `next()`.
+    @usableFromInline
     enum NextAction {
         /// Indicates that the element should be returned to the caller.
         case returnElement(Element)
         /// Indicates that the element should be returned to the caller and that all producers should be called.
-        case returnElementAndResumeProducers(Element, [(Result<Void, Error>) -> Void])
+        case returnElementAndResumeProducers(Element, _TinyArray<(Result<Void, Error>) -> Void>)
         /// Indicates that the `Failure` should be returned to the caller and that `onTermination` should be called.
         case returnFailureAndCallOnTermination(Failure?, (() -> Void)?)
         /// Indicates that the `nil` should be returned to the caller.
@@ -994,14 +1099,15 @@ struct _AsyncBackPressuredStateMachine<Element, Failure: Error>: Sendable {
         case suspendTask
     }
 
+    @inlinable
     mutating func next() -> NextAction {
         switch self._state {
         case .initial(let initial):
-            // We are not interacting with the back-pressure strategy here because
-            // we are doing this inside `next(:)`
-            self._state = .streaming(
+            // We are not interacting with the backpressure strategy here because
+            // we are doing this inside `suspendNext`
+            self._state = .channeling(
                 .init(
-                    backPressureStrategy: initial.backPressureStrategy,
+                    backpressureStrategy: initial.backpressureStrategy,
                     iteratorInitialized: initial.iteratorInitialized,
                     onTermination: initial.onTermination,
                     buffer: Deque<Element>(),
@@ -1013,35 +1119,35 @@ struct _AsyncBackPressuredStateMachine<Element, Failure: Error>: Sendable {
             )
 
             return .suspendTask
-        case .streaming(var streaming):
-            guard streaming.consumerContinuation == nil else {
+        case .channeling(var channeling):
+            guard channeling.consumerContinuation == nil else {
                 // We have multiple AsyncIterators iterating the sequence
-                fatalError("AsyncStream internal inconsistency")
+                fatalError("MultiProducerSingleConsumerChannel internal inconsistency")
             }
 
             self._state = .modify
 
-            guard let element = streaming.buffer.popFirst() else {
+            guard let element = channeling.buffer.popFirst() else {
                 // There is nothing in the buffer to fulfil the demand so we need to suspend.
-                // We are not interacting with the back-pressure strategy here because
+                // We are not interacting with the backpressure strategy here because
                 // we are doing this inside `suspendNext`
-                self._state = .streaming(streaming)
+                self._state = .channeling(channeling)
 
                 return .suspendTask
             }
             // We have an element to fulfil the demand right away.
-            let shouldProduceMore = streaming.backPressureStrategy.didConsume(element: element)
-            streaming.hasOutstandingDemand = shouldProduceMore
+            let shouldProduceMore = channeling.backpressureStrategy.didConsume(element: element)
+            channeling.hasOutstandingDemand = shouldProduceMore
 
             guard shouldProduceMore else {
                 // We don't have any new demand, so we can just return the element.
-                self._state = .streaming(streaming)
+                self._state = .channeling(channeling)
                 return .returnElement(element)
             }
             // There is demand and we have to resume our producers
-            let producers = Array(streaming.producerContinuations.map { $0.1 })
-            streaming.producerContinuations.removeAll()
-            self._state = .streaming(streaming)
+            let producers = _TinyArray(channeling.producerContinuations.lazy.map { $0.1 })
+            channeling.producerContinuations.removeAll(keepingCapacity: true)
+            self._state = .channeling(channeling)
             return .returnElementAndResumeProducers(element, producers)
 
         case .sourceFinished(var sourceFinished):
@@ -1050,7 +1156,7 @@ struct _AsyncBackPressuredStateMachine<Element, Failure: Error>: Sendable {
 
             guard let element = sourceFinished.buffer.popFirst() else {
                 // We are returning the queued failure now and can transition to finished
-                self._state = .finished(iteratorInitialized: sourceFinished.iteratorInitialized)
+                self._state = .finished(.init(iteratorInitialized: sourceFinished.iteratorInitialized, sourceFinished: true))
 
                 return .returnFailureAndCallOnTermination(sourceFinished.failure, sourceFinished.onTermination)
             }
@@ -1062,66 +1168,67 @@ struct _AsyncBackPressuredStateMachine<Element, Failure: Error>: Sendable {
             return .returnNil
 
         case .modify:
-            fatalError("AsyncStream internal inconsistency")
+            fatalError("MultiProducerSingleConsumerChannel internal inconsistency")
         }
     }
 
     /// Actions returned by `suspendNext()`.
+    @usableFromInline
     enum SuspendNextAction {
         /// Indicates that the consumer should be resumed.
-        case resumeConsumerWithElement(CheckedContinuation<Element?, Error>, Element)
+        case resumeConsumerWithElement(UnsafeContinuation<Element?, Error>, Element)
         /// Indicates that the consumer and all producers should be resumed.
         case resumeConsumerWithElementAndProducers(
-            CheckedContinuation<Element?, Error>,
+            UnsafeContinuation<Element?, Error>,
             Element,
-            [(Result<Void, Error>) -> Void]
+            _TinyArray<(Result<Void, Error>) -> Void>
         )
         /// Indicates that the consumer should be resumed with the failure and that `onTermination` should be called.
         case resumeConsumerWithFailureAndCallOnTermination(
-            CheckedContinuation<Element?, Error>,
+            UnsafeContinuation<Element?, Error>,
             Failure?,
             (() -> Void)?
         )
         /// Indicates that the consumer should be resumed with `nil`.
-        case resumeConsumerWithNil(CheckedContinuation<Element?, Error>)
+        case resumeConsumerWithNil(UnsafeContinuation<Element?, Error>)
     }
 
-    mutating func suspendNext(continuation: CheckedContinuation<Element?, Error>) -> SuspendNextAction? {
+    @inlinable
+    mutating func suspendNext(continuation: UnsafeContinuation<Element?, Error>) -> SuspendNextAction? {
         switch self._state {
         case .initial:
-            // We need to transition to streaming before we can suspend
-            preconditionFailure("AsyncStream internal inconsistency")
+            preconditionFailure("MultiProducerSingleConsumerChannel internal inconsistency")
 
-        case .streaming(var streaming):
-            guard streaming.consumerContinuation == nil else {
+        case .channeling(var channeling):
+            guard channeling.consumerContinuation == nil else {
                 // We have multiple AsyncIterators iterating the sequence
-                fatalError("This should never happen since we only allow a single Iterator to be created")
+                fatalError("MultiProducerSingleConsumerChannel internal inconsistency")
             }
 
             self._state = .modify
 
             // We have to check here again since we might have a producer interleave next and suspendNext
-            guard let element = streaming.buffer.popFirst() else {
+            guard let element = channeling.buffer.popFirst() else {
                 // There is nothing in the buffer to fulfil the demand so we to store the continuation.
-                streaming.consumerContinuation = continuation
-                self._state = .streaming(streaming)
+                channeling.consumerContinuation = continuation
+                self._state = .channeling(channeling)
 
                 return .none
             }
             // We have an element to fulfil the demand right away.
 
-            let shouldProduceMore = streaming.backPressureStrategy.didConsume(element: element)
-            streaming.hasOutstandingDemand = shouldProduceMore
+            let shouldProduceMore = channeling.backpressureStrategy.didConsume(element: element)
+            channeling.hasOutstandingDemand = shouldProduceMore
 
             guard shouldProduceMore else {
                 // We don't have any new demand, so we can just return the element.
-                self._state = .streaming(streaming)
+                self._state = .channeling(channeling)
                 return .resumeConsumerWithElement(continuation, element)
             }
             // There is demand and we have to resume our producers
-            let producers = Array(streaming.producerContinuations.map { $0.1 })
-            streaming.producerContinuations.removeAll()
-            self._state = .streaming(streaming)
+            let producers = _TinyArray(channeling.producerContinuations.lazy.map { $0.1 })
+            channeling.producerContinuations.removeAll(keepingCapacity: true)
+            self._state = .channeling(channeling)
             return .resumeConsumerWithElementAndProducers(continuation, element, producers)
 
         case .sourceFinished(var sourceFinished):
@@ -1130,7 +1237,7 @@ struct _AsyncBackPressuredStateMachine<Element, Failure: Error>: Sendable {
 
             guard let element = sourceFinished.buffer.popFirst() else {
                 // We are returning the queued failure now and can transition to finished
-                self._state = .finished(iteratorInitialized: sourceFinished.iteratorInitialized)
+                self._state = .finished(.init(iteratorInitialized: sourceFinished.iteratorInitialized, sourceFinished: true))
 
                 return .resumeConsumerWithFailureAndCallOnTermination(
                     continuation,
@@ -1146,47 +1253,222 @@ struct _AsyncBackPressuredStateMachine<Element, Failure: Error>: Sendable {
             return .resumeConsumerWithNil(continuation)
 
         case .modify:
-            fatalError("AsyncStream internal inconsistency")
+            fatalError("MultiProducerSingleConsumerChannel internal inconsistency")
         }
     }
 
     /// Actions returned by `cancelNext()`.
+    @usableFromInline
     enum CancelNextAction {
         /// Indicates that the continuation should be resumed with nil, the producers should be finished and call onTermination.
-        case resumeConsumerWithNilAndCallOnTermination(CheckedContinuation<Element?, Error>, (() -> Void)?)
+        case resumeConsumerWithNilAndCallOnTermination(UnsafeContinuation<Element?, Error>, (() -> Void)?)
         /// Indicates that the producers should be finished and call onTermination.
-        case failProducersAndCallOnTermination([(Result<Void, Error>) -> Void], (() -> Void)?)
+        case failProducersAndCallOnTermination(_TinyArray<(Result<Void, Error>) -> Void>, (() -> Void)?)
     }
 
+    @inlinable
     mutating func cancelNext() -> CancelNextAction? {
         switch self._state {
         case .initial:
-            // We need to transition to streaming before we can suspend
-            fatalError("AsyncStream internal inconsistency")
+            fatalError("MultiProducerSingleConsumerChannel internal inconsistency")
 
-        case .streaming(let streaming):
-            self._state = .finished(iteratorInitialized: streaming.iteratorInitialized)
+        case .channeling(let channeling):
+            self._state = .finished(.init(iteratorInitialized: channeling.iteratorInitialized, sourceFinished: false))
 
-            guard let consumerContinuation = streaming.consumerContinuation else {
+            guard let consumerContinuation = channeling.consumerContinuation else {
                 return .failProducersAndCallOnTermination(
-                    Array(streaming.producerContinuations.map { $0.1 }),
-                    streaming.onTermination
+                    .init(channeling.producerContinuations.lazy.map { $0.1 }),
+                    channeling.onTermination
                 )
             }
             precondition(
-                streaming.producerContinuations.isEmpty,
+                channeling.producerContinuations.isEmpty,
                 "Internal inconsistency. Unexpected producer continuations."
             )
             return .resumeConsumerWithNilAndCallOnTermination(
                 consumerContinuation,
-                streaming.onTermination
+                channeling.onTermination
             )
 
         case .sourceFinished, .finished:
             return .none
 
         case .modify:
-            fatalError("AsyncStream internal inconsistency")
+            fatalError("MultiProducerSingleConsumerChannel internal inconsistency")
+        }
+    }
+}
+
+@usableFromInline
+enum _MultiProducerSingleConsumerState<Element, Failure: Error>: CustomStringConvertible {
+    @usableFromInline
+    struct Initial: CustomStringConvertible {
+        /// The backpressure strategy.
+        @usableFromInline
+        var backpressureStrategy: _MultiProducerSingleConsumerChannelInternalBackpressureStrategy<Element>
+
+        /// Indicates if the iterator was initialized.
+        @usableFromInline
+        var iteratorInitialized: Bool
+
+        /// The onTermination callback.
+        @usableFromInline
+        var onTermination: (@Sendable () -> Void)?
+
+        @usableFromInline
+        var description: String {
+            "backpressure:\(self.backpressureStrategy.description) iteratorInitialized:\(self.iteratorInitialized)"
+        }
+    }
+
+    @usableFromInline
+    struct Channeling {
+        /// The backpressure strategy.
+        @usableFromInline
+        var backpressureStrategy: _MultiProducerSingleConsumerChannelInternalBackpressureStrategy<Element>
+
+        /// Indicates if the iterator was initialized.
+        @usableFromInline
+        var iteratorInitialized: Bool
+
+        /// The onTermination callback.
+        @usableFromInline
+        var onTermination: (@Sendable () -> Void)?
+
+        /// The buffer of elements.
+        @usableFromInline
+        var buffer: Deque<Element>
+
+        /// The optional consumer continuation.
+        @usableFromInline
+        var consumerContinuation: UnsafeContinuation<Element?, Error>?
+
+        /// The producer continuations.
+        @usableFromInline
+        var producerContinuations: Deque<(UInt64, (Result<Void, Error>) -> Void)>
+
+        /// The producers that have been cancelled.
+        @usableFromInline
+        var cancelledAsyncProducers: Deque<UInt64>
+
+        /// Indicates if we currently have outstanding demand.
+        @usableFromInline
+        var hasOutstandingDemand: Bool
+
+        var description: String {
+            "backpressure:\(self.backpressureStrategy.description) iteratorInitialized:\(self.iteratorInitialized) buffer:\(self.buffer.count) consumerContinuation:\(self.consumerContinuation == nil) producerContinuations:\(self.producerContinuations.count) cancelledProducers:\(self.cancelledAsyncProducers.count) hasOutstandingDemand:\(self.hasOutstandingDemand)"
+        }
+
+        @usableFromInline
+        init(
+            backpressureStrategy: _MultiProducerSingleConsumerChannelInternalBackpressureStrategy<Element>, iteratorInitialized: Bool,
+            onTermination: (@Sendable () -> Void)? = nil,
+            buffer: Deque<Element>,
+            consumerContinuation: UnsafeContinuation<Element?, Error>? = nil,
+            producerContinuations: Deque<(UInt64, (Result<Void, Error>) -> Void)>,
+            cancelledAsyncProducers: Deque<UInt64>,
+            hasOutstandingDemand: Bool) {
+            self.backpressureStrategy = backpressureStrategy
+            self.iteratorInitialized = iteratorInitialized
+            self.onTermination = onTermination
+            self.buffer = buffer
+            self.consumerContinuation = consumerContinuation
+            self.producerContinuations = producerContinuations
+            self.cancelledAsyncProducers = cancelledAsyncProducers
+            self.hasOutstandingDemand = hasOutstandingDemand
+        }
+    }
+
+    @usableFromInline
+    struct SourceFinished {
+        /// Indicates if the iterator was initialized.
+        @usableFromInline
+        var iteratorInitialized: Bool
+
+        /// The buffer of elements.
+        @usableFromInline
+        var buffer: Deque<Element>
+
+        /// The failure that should be thrown after the last element has been consumed.
+        @usableFromInline
+        var failure: Failure?
+
+        /// The onTermination callback.
+        @usableFromInline
+        var onTermination: (@Sendable () -> Void)?
+
+        var description: String {
+            "iteratorInitialized:\(self.iteratorInitialized) buffer:\(self.buffer.count) failure:\(self.failure == nil)"
+        }
+
+        @usableFromInline
+        init(
+            iteratorInitialized: Bool,
+            buffer: Deque<Element>,
+            failure: Failure? = nil,
+            onTermination: (@Sendable () -> Void)? = nil
+        ) {
+            self.iteratorInitialized = iteratorInitialized
+            self.buffer = buffer
+            self.failure = failure
+            self.onTermination = onTermination
+        }
+    }
+
+    @usableFromInline
+    struct Finished {
+        /// Indicates if the iterator was initialized.
+        @usableFromInline
+        var iteratorInitialized: Bool
+
+        /// Indicates if the source was finished.
+        @usableFromInline
+        var sourceFinished: Bool
+
+        var description: String {
+            "iteratorInitialized:\(self.iteratorInitialized) sourceFinished:\(self.sourceFinished)"
+        }
+
+        @inlinable
+        init(
+            iteratorInitialized: Bool,
+            sourceFinished: Bool
+        ) {
+            self.iteratorInitialized = iteratorInitialized
+            self.sourceFinished = sourceFinished
+        }
+    }
+
+    /// The initial state.
+    case initial(Initial)
+
+    /// The state once either any element was sent or `next()` was called.
+    case channeling(Channeling)
+
+    /// The state once the underlying source signalled that it is finished.
+    case sourceFinished(SourceFinished)
+
+    /// The state once there can be no outstanding demand. This can happen if:
+    /// 1. The iterator was deinited
+    /// 2. The underlying source finished and all buffered elements have been consumed
+    case finished(Finished)
+
+    /// An intermediate state to avoid CoWs.
+    case modify
+
+    @usableFromInline
+    var description: String {
+        switch self {
+        case .initial(let initial):
+            return "initial \(initial.description)"
+        case .channeling(let channeling):
+            return "channeling \(channeling.description)"
+        case .sourceFinished(let sourceFinished):
+            return "sourceFinished \(sourceFinished.description)"
+        case .finished(let finished):
+            return "finished \(finished.description)"
+        case .modify:
+            fatalError()
         }
     }
 }

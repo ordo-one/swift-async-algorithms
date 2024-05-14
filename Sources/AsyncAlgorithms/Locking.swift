@@ -17,17 +17,23 @@ import Glibc
 import WinSDK
 #endif
 
+@usableFromInline
 internal struct Lock {
 #if canImport(Darwin)
+    @usableFromInline
   typealias Primitive = os_unfair_lock
 #elseif canImport(Glibc)
+    @usableFromInline
   typealias Primitive = pthread_mutex_t
 #elseif canImport(WinSDK)
+    @usableFromInline
   typealias Primitive = SRWLOCK
 #else
+    @usableFromInline
   typealias Primitive = Int
 #endif
   
+    @usableFromInline
   typealias PlatformLock = UnsafeMutablePointer<Primitive>
   let platformLock: PlatformLock
 
@@ -54,7 +60,8 @@ internal struct Lock {
     platformLock.deinitialize(count: 1)
   }
   
-  fileprivate static func lock(_ platformLock: PlatformLock) {
+    @usableFromInline
+  static func lock(_ platformLock: PlatformLock) {
 #if canImport(Darwin)
     os_unfair_lock_lock(platformLock)
 #elseif canImport(Glibc)
@@ -64,7 +71,8 @@ internal struct Lock {
 #endif
   }
   
-  fileprivate static func unlock(_ platformLock: PlatformLock) {
+    @usableFromInline
+  static func unlock(_ platformLock: PlatformLock) {
 #if canImport(Darwin)
     os_unfair_lock_unlock(platformLock)
 #elseif canImport(Glibc)
@@ -115,14 +123,17 @@ internal struct Lock {
     }
 }
 
+@usableFromInline
 struct ManagedCriticalState<State> {
-  private final class LockedBuffer: ManagedBuffer<State, Lock.Primitive> {
+  @usableFromInline
+  final class LockedBuffer: ManagedBuffer<State, Lock.Primitive> {
     deinit {
       withUnsafeMutablePointerToElements { Lock.deinitialize($0) }
     }
   }
   
-  private let buffer: ManagedBuffer<State, Lock.Primitive>
+    @usableFromInline
+  let buffer: ManagedBuffer<State, Lock.Primitive>
   
   init(_ initial: State) {
     buffer = LockedBuffer.create(minimumCapacity: 1) { buffer in
@@ -131,6 +142,7 @@ struct ManagedCriticalState<State> {
     }
   }
   
+    @inlinable
   func withCriticalRegion<R>(_ critical: (inout State) throws -> R) rethrows -> R {
     try buffer.withUnsafeMutablePointers { header, lock in
       Lock.lock(lock)

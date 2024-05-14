@@ -1,6 +1,6 @@
-# Externally backpressured support for AsyncStream
+# MutliProducerSingleConsumerChannel
 
-* Proposal: [SAA-0016](0016-backpressured-stream.md)
+* Proposal: [SAA-0016](0016-multi-producer-single-consumer-channel.md)
 * Authors: [Franz Busch](https://github.com/FranzBusch)
 * Review Manager: TBD
 * Status: **Implemented**
@@ -8,17 +8,17 @@
 ## Revision
 - 2023/12/18: Migrate proposal from Swift Evolution to Swift Async Algorithms.
 - 2023/12/19: Add element size dependent strategy
+- 2024/05/19: Rename to multi producer single consumer channel
+- 2024/05/28: Add unbounded strategy
 
 ## Introduction
 
 [SE-0314](https://github.com/apple/swift-evolution/blob/main/proposals/0314-async-stream.md)
 introduced new `Async[Throwing]Stream` types which act as root asynchronous
 sequences. These two types allow bridging from synchronous callbacks such as
-delegates to an asynchronous sequence. This proposal adds a new way of
-constructing asynchronous streams with the goal to bridge backpressured systems
-into an asynchronous sequence. Furthermore, this proposal aims to clarify the
-cancellation behaviour both when the consuming task is cancelled and when
-the production side indicates termination.
+delegates to an asynchronous sequence. This proposal adds a new root
+asynchronous sequence with the goal to bridge multi producer systems
+into an asynchronous sequence.
 
 ## Motivation
 
@@ -120,19 +120,19 @@ are the behaviors where `Async[Throwing]Stream` diverges from the expectations.
 - Consumer termination: Doesn't handle the `Continuation` being `deinit`ed
 - Producer termination: Happens on first consumer termination 
 
-This section proposes a new type called `AsyncBackpressuredStream` that implement all of
+This section proposes a new type called `MutliProducerSingleConsumerChannel` that implement all of
 the above-mentioned behaviors.
 
-### Creating an AsyncBackpressuredStream
+### Creating an MutliProducerSingleConsumerChannel
 
-You can create an `AsyncBackpressuredStream` instance using the new
-`makeStream(of: backpressureStrategy:)` method. This method returns you the
-stream and the source. The source can be used to write new values to the
-asynchronous stream. The new API specifically provides a
+You can create an `MutliProducerSingleConsumerChannel` instance using the new
+`makeChannel(of: backpressureStrategy:)` method. This method returns you the
+channel and the source. The source can be used to send new values to the
+asynchronous channel. The new API specifically provides a
 multi-producer/single-consumer pattern.
 
 ```swift
-let (stream, source) = AsyncBackpressuredStream.makeStream(
+let (channel, source) = MutliProducerSingleConsumerChannel.makeChannel(
     of: Int.self,
     backpressureStrategy: .watermark(low: 2, high: 4)
 )
@@ -144,9 +144,9 @@ example of how it can be used:
 
 ```swift
 do {
-    let writeResult = try source.write(contentsOf: sequence)
+    let sendResult = try source.send(contentsOf: sequence)
     
-    switch writeResult {
+    switch sendResult {
     case .produceMore:
        // Trigger more production
     
@@ -161,13 +161,13 @@ do {
         })
     }
 } catch {
-    // `write(contentsOf:)` throws if the asynchronous stream already terminated
+    // `send(contentsOf:)` throws if the asynchronous stream already terminated
 }
 ```
 
 The above API offers the most control and highest performance when bridging a
-synchronous producer to an asynchronous sequence. First, you have to write
-values using the `write(contentsOf:)` which returns a `WriteResult`. The result
+synchronous producer to an asynchronous sequence. First, you have to send
+values using the `send(contentsOf:)` which returns a `SendResult`. The result
 either indicates that more values should be produced or that a callback should
 be enqueued by calling the `enqueueCallback(callbackToken: onProduceMore:)`
 method. This callback is invoked once the backpressure strategy decided that
@@ -176,12 +176,12 @@ the greatest performance. The callback only has to be allocated in the case
 where the producer needs to be suspended.
 
 Additionally, the above API is the building block for some higher-level and
-easier-to-use APIs to write values to the asynchronous stream. Below is an
+easier-to-use APIs to send values to the channel. Below is an
 example of the two higher-level APIs.
 
 ```swift
 // Writing new values and providing a callback when to produce more
-try source.write(contentsOf: sequence, onProduceMore: { result in
+try source.send(contentsOf: sequence, onProduceMore: { result in
     switch result {
     case .success:
         // Trigger more production
@@ -191,11 +191,11 @@ try source.write(contentsOf: sequence, onProduceMore: { result in
 })
 
 // This method suspends until more values should be produced
-try await source.write(contentsOf: sequence)
+try await source.send(contentsOf: sequence)
 ```
 
 With the above APIs, we should be able to effectively bridge any system into an
-asynchronous stream regardless if the system is callback-based, blocking or
+asynchronous sequence regardless if the system is callback-based, blocking or
 asynchronous.
 
 ### Downstream consumer termination
@@ -208,15 +208,15 @@ this:
 
 ```swift
 // Termination through calling finish
-let (stream, source) = AsyncBackpressuredStream.makeStream(
+let (channel, source) = MutliProducerSingleConsumerChannel.makeChannel(
     of: Int.self,
     backpressureStrategy: .watermark(low: 2, high: 4)
 )
 
-_ = try await source.write(1)
+_ = try await source.send(1)
 source.finish()
 
-for try await element in stream {
+for try await element in channel {
     print(element)
 }
 print("Finished")
@@ -232,12 +232,12 @@ indefinitely.
 
 ```swift
 // Termination through deiniting the source
-let (stream, _) = AsyncStream.makeStream(
+let (channel, _) = MutliProducerSingleConsumerChannel.makeChannel(
     of: Int.self,
     backpressureStrategy: .watermark(low: 2, high: 4)
 )
 
-for await element in stream {
+for await element in channel {
     print(element)
 }
 print("Finished")
@@ -246,8 +246,8 @@ print("Finished")
 // Finished
 ```
 
-Trying to write more elements after the source has been finish will result in an
-error thrown from the write methods.
+Trying to send more elements after the source has been finish will result in an
+error thrown from the send methods.
 
 ### Upstream producer termination
 
@@ -256,13 +256,13 @@ callback. Termination of the producer happens in the following scenarios:
 
 ```swift
 // Termination through task cancellation
-let (stream, source) = AsyncStream.makeStream(
+let (channel source) = MutliProducerSingleConsumerChannel.makeChannel(
     of: Int.self,
     backpressureStrategy: .watermark(low: 2, high: 4)
 )
 
 let task = Task {
-    for await element in stream {
+    for await element in channel {
 
     }
 }
@@ -271,7 +271,7 @@ task.cancel()
 
 ```swift
 // Termination through deiniting the sequence
-let (_, source) = AsyncStream.makeStream(
+let (_, source) = MutliProducerSingleConsumerChannel.makeChannel(
     of: Int.self,
     backpressureStrategy: .watermark(low: 2, high: 4)
 )
@@ -279,109 +279,120 @@ let (_, source) = AsyncStream.makeStream(
 
 ```swift
 // Termination through deiniting the iterator
-let (stream, source) = AsyncStream.makeStream(
+let (channel, source) = MutliProducerSingleConsumerChannel.makeChannel(
     of: Int.self,
     backpressureStrategy: .watermark(low: 2, high: 4)
 )
-_ = stream.makeAsyncIterator()
+_ = channel.makeAsyncIterator()
 ```
 
 ```swift
 // Termination through calling finish
-let (stream, source) = AsyncStream.makeStream(
+let (channel, source) = MutliProducerSingleConsumerChannel.makeChannel(
     of: Int.self,
     backpressureStrategy: .watermark(low: 2, high: 4)
 )
 
-_ = try source.write(1)
+_ = try source.send(1)
 source.finish()
 
-for await element in stream {}
+for await element in channel {}
 
 // onTerminate will be called after all elements have been consumed
 ```
 
-Similar to the downstream consumer termination, trying to write more elements after the
-producer has been terminated will result in an error thrown from the write methods. 
+Similar to the downstream consumer termination, trying to send more elements after the
+producer has been terminated will result in an error thrown from the send methods. 
 
 ## Detailed design
 
-All new APIs on `AsyncStream` and `AsyncThrowingStream` are as follows:
-
 ```swift
-/// Error that is thrown from the various `write` methods of the
-/// ``AsyncBackpressuredStream/Source``.
+/// An error that is thrown from the various `send` methods of the
+/// ``MultiProducerSingleConsumerChannel/Source``.
 ///
-/// This error is thrown when the asynchronous stream is already finished when
-/// trying to write new elements.
-public struct AsyncBackpressuredStreamAlreadyFinishedError : Error {
+/// This error is thrown when the channel is already finished when
+/// trying to send new elements to the source.
+public struct MultiProducerSingleConsumerChannelAlreadyFinishedError : Error {
+
+    @usableFromInline
+    internal init()
 }
 
-/// A struct that acts as a source asynchronous sequence.
+/// A multi producer single consumer channel.
 ///
-/// The ``AsyncBackpressuredStream`` provides a ``AsyncBackpressuredStream/Source`` to
-/// write values to the stream. The source exposes the internal backpressure of the asynchronous sequence to the
-/// external producer. This allows to bridge both synchronous and asynchronous producers into an asynchronous sequence.
+/// The ``MultiProducerSingleConsumerChannel`` provides a ``MultiProducerSingleConsumerChannel/Source`` to
+/// send values to the channel. The source exposes the internal backpressure of the asynchronous sequence to the
+/// producer. Additionally, the source can be used from synchronous and asynchronous contexts.
 ///
-/// ## Using an AsyncBackpressuredStream
 ///
-/// To use an ``AsyncBackpressuredStream`` you have to create a new stream with it's source first by calling
-/// the ``AsyncBackpressuredStream/makeStream(of:throwing:backpressureStrategy:)`` method.
-/// Afterwards, you can pass the source to the producer and the stream to the consumer.
+/// ## Using a MultiProducerSingleConsumerChannel
+///
+/// To use a ``MultiProducerSingleConsumerChannel`` you have to create a new channel with it's source first by calling
+/// the ``MultiProducerSingleConsumerChannel/makeChannel(of:throwing:BackpressureStrategy:)`` method.
+/// Afterwards, you can pass the source to the producer and the channel to the consumer.
 ///
 /// ```
-/// let (stream, source) = AsyncBackpressuredStream<Int, Never>.makeStream(
+/// let (channel, source) = MultiProducerSingleConsumerChannel<Int, Never>.makeChannel(
 ///     backpressureStrategy: .watermark(low: 2, high: 4)
 /// )
+/// ```
 ///
+/// ### Asynchronous producers
+///
+/// Values can be send to the source from asynchronous contexts using ``MultiProducerSingleConsumerChannel/Source/send(_:)-9b5do``
+/// and ``MultiProducerSingleConsumerChannel/Source/send(contentsOf:)-4myrz``. Backpressure results in calls
+/// to the `send` methods to be suspended. Once more elements should be produced the `send` methods will be resumed.
+///
+/// ```
 /// try await withThrowingTaskGroup(of: Void.self) { group in
 ///     group.addTask {
-///         try await source.write(1)
-///         try await source.write(2)
-///         try await source.write(3)
+///         try await source.send(1)
+///         try await source.send(2)
+///         try await source.send(3)
 ///     }
 ///
-///     for await element in stream {
+///     for await element in channel {
 ///         print(element)
 ///     }
 /// }
 /// ```
 ///
-/// The source also exposes synchronous write methods that communicate the backpressure via callbacks.
-public struct AsyncBackpressuredStream<Element, Failure: Error>: AsyncSequence {
-    /// Initializes a new ``AsyncBackpressuredStream`` and an ``AsyncBackpressuredStream/Source``.
+/// ### Synchronous producers
+///
+/// Values can also be send to the source from synchronous context. Backpressure is also exposed on the synchronous contexts; however,
+/// it is up to the caller to decide how to properly translate the backpressure to underlying producer e.g. by blocking the thread.
+///
+/// ## Finishing the source
+///
+/// To properly notify the consumer if the production of values has been finished the source's ``MultiProducerSingleConsumerChannel/Source/finish(throwing:)`` **must** be called.
+public struct MultiProducerSingleConsumerChannel<Element, Failure: Error>: AsyncSequence {
+    /// Initializes a new ``MultiProducerSingleConsumerChannel`` and an ``MultiProducerSingleConsumerChannel/Source``.
     ///
     /// - Parameters:
-    ///   - elementType: The element type of the stream.
-    ///   - failureType: The failure type of the stream.
-    ///   - backPressureStrategy: The backpressure strategy that the stream should use.
-    /// - Returns: A tuple containing the stream and its source. The source should be passed to the
-    ///   producer while the stream should be passed to the consumer.
-    public static func makeStream(
-        of elementType: Element.Type = Element.self,
-        throwing failureType: Failure.Type = Failure.self,
-        backPressureStrategy: Source.BackPressureStrategy
-    ) -> (`Self`, Source) where Failure == any Error
+    ///   - elementType: The element type of the channel.
+    ///   - failureType: The failure type of the channel.
+    ///   - BackpressureStrategy: The backpressure strategy that the channel should use.
+    /// - Returns: A tuple containing the channel and its source. The source should be passed to the
+    ///   producer while the channel should be passed to the consumer.
+    public static func makeChannel(of elementType: Element.Type = Element.self, throwing failureType: Failure.Type = Never.self, backpressureStrategy: Source.BackpressureStrategy) -> (`Self`, Source)
 }
 
-extension AsyncBackpressuredStream {
-    /// A struct to interface between producer code and an asynchronous stream.
+extension MultiProducerSingleConsumerChannel {
+    /// A struct to send values to the channel.
     ///
-    /// Use this source to provide elements to the stream by calling one of the `write` methods, then terminate the stream normally
-    /// by calling the `finish()` method. You can also use the source's `finish(throwing:)` method to terminate the stream by
-    /// throwing an error.
+    /// Use this source to provide elements to the channel by calling one of the `send` methods.
     ///
-    /// - Important: You must  terminate the source by calling one of the `finish` methods otherwise the stream's iterator
-    /// will never terminate.
+    /// - Important: You must terminate the source by calling ``finish(throwing:)``.
     public struct Source: Sendable {
-        /// A strategy that handles the backpressure of the asynchronous stream.
-        public struct BackPressureStrategy: Sendable {
+        /// A strategy that handles the backpressure of the channel.
+        public struct BackpressureStrategy: Sendable {
+
             /// A backpressure strategy using a high and low watermark to suspend and resume production respectively.
             ///
             /// - Parameters:
             ///   - low: When the number of buffered elements drops below the low watermark, producers will be resumed.
             ///   - high: When the number of buffered elements rises above the high watermark, producers will be suspended.
-            public static func watermark(low: Int, high: Int) -> BackPressureStrategy
+            public static func watermark(low: Int, high: Int) -> BackpressureStrategy
 
             /// A backpressure strategy using a high and low watermark to suspend and resume production respectively.
             ///
@@ -391,15 +402,15 @@ extension AsyncBackpressuredStream {
             ///   - waterLevelForElement: A closure used to compute the contribution of each buffered element to the current water level.
             ///
             /// - Note, `waterLevelForElement` will be called on each element when it is written into the source and when
-            /// it is consumed from the stream, so it is recommended to provide an function that runs in constant time.
-            public static func watermark(low: Int, high: Int, waterLevelForElement: @escaping @Sendable (Element) -> Int) -> BackPressureStrategy
+            /// it is consumed from the channel, so it is recommended to provide an function that runs in constant time.
+            public static func watermark(low: Int, high: Int, waterLevelForElement: @escaping @Sendable (Element) -> Int) -> BackpressureStrategy
         }
 
-        /// A type that indicates the result of writing elements to the source.
-        public enum WriteResult: Sendable {
-            /// A token that is returned when the asynchronous stream's backpressure strategy indicated that production should
+        /// A type that indicates the result of sending elements to the source.
+        public enum SendResult: Sendable {
+            /// A token that is returned when the channel's backpressure strategy indicated that production should
             /// be suspended. Use this token to enqueue a callback by  calling the ``enqueueCallback(_:)`` method.
-            public struct CallbackToken: Sendable {}
+            public struct CallbackToken: Sendable { }
 
             /// Indicates that more elements should be produced and written to the source.
             case produceMore
@@ -410,44 +421,44 @@ extension AsyncBackpressuredStream {
             case enqueueCallback(CallbackToken)
         }
 
-        /// A callback to invoke when the stream finished.
+        /// A callback to invoke when the channel finished.
         ///
-        /// The stream finishes and calls this closure in the following cases:
+        /// The channel finishes and calls this closure in the following cases:
         /// - No iterator was created and the sequence was deinited
         /// - An iterator was created and deinited
         /// - After ``finish(throwing:)`` was called and all elements have been consumed
         public var onTermination: (@Sendable () -> Void)? { get set }
 
-        /// Writes new elements to the asynchronous stream.
+        /// Sends new elements to the channel.
         ///
-        /// If there is a task consuming the stream and awaiting the next element then the task will get resumed with the
-        /// first element of the provided sequence. If the asynchronous stream already terminated then this method will throw an error
+        /// If there is a task consuming the channel and awaiting the next element then the task will get resumed with the
+        /// first element of the provided sequence. If the channel already terminated then this method will throw an error
         /// indicating the failure.
         ///
-        /// - Parameter sequence: The elements to write to the asynchronous stream.
+        /// - Parameter sequence: The elements to send to the channel.
         /// - Returns: The result that indicates if more elements should be produced at this time.
-        public func write<S>(contentsOf sequence: S) throws -> WriteResult where Element == S.Element, S : Sequence
+        public func send<S>(contentsOf sequence: S) throws -> SendResult where Element == S.Element, S : Sequence
 
-        /// Write the element to the asynchronous stream.
+        /// Send the element to the channel.
         ///
-        /// If there is a task consuming the stream and awaiting the next element then the task will get resumed with the
-        /// provided element. If the asynchronous stream already terminated then this method will throw an error
+        /// If there is a task consuming the channel and awaiting the next element then the task will get resumed with the
+        /// provided element. If the channel already terminated then this method will throw an error
         /// indicating the failure.
         ///
-        /// - Parameter element: The element to write to the asynchronous stream.
+        /// - Parameter element: The element to send to the channel.
         /// - Returns: The result that indicates if more elements should be produced at this time.
-        public func write(_ element: Element) throws -> WriteResult
+        public func send(_ element: Element) throws -> SendResult
 
         /// Enqueues a callback that will be invoked once more elements should be produced.
         ///
-        /// Call this method after ``write(contentsOf:)`` or ``write(:)`` returned ``WriteResult/enqueueCallback(_:)``.
+        /// Call this method after ``send(contentsOf:)-5honm`` or ``send(_:)-3jxzb`` returned ``SendResult/enqueueCallback(_:)``.
         ///
         /// - Important: Enqueueing the same token multiple times is not allowed.
         ///
         /// - Parameters:
         ///   - callbackToken: The callback token.
         ///   - onProduceMore: The callback which gets invoked once more elements should be produced.
-        public func enqueueCallback(callbackToken: WriteResult.CallbackToken, onProduceMore: @escaping @Sendable (Result<Void, Error>) -> Void)
+        public func enqueueCallback(callbackToken: consuming SendResult.CallbackToken, onProduceMore: @escaping @Sendable (Result<Void, Error>) -> Void)
 
         /// Cancel an enqueued callback.
         ///
@@ -457,98 +468,94 @@ extension AsyncBackpressuredStream {
         /// will mark the passed `callbackToken` as cancelled.
         ///
         /// - Parameter callbackToken: The callback token.
-        public func cancelCallback(callbackToken: WriteResult.CallbackToken)
+        public func cancelCallback(callbackToken: consuming SendResult.CallbackToken)
 
-        /// Write new elements to the asynchronous stream and provide a callback which will be invoked once more elements should be produced.
+        /// Send new elements to the channel and provide a callback which will be invoked once more elements should be produced.
         ///
-        /// If there is a task consuming the stream and awaiting the next element then the task will get resumed with the
-        /// first element of the provided sequence. If the asynchronous stream already terminated then `onProduceMore` will be invoked with
+        /// If there is a task consuming the channel and awaiting the next element then the task will get resumed with the
+        /// first element of the provided sequence. If the channel already terminated then `onProduceMore` will be invoked with
         /// a `Result.failure`.
         ///
         /// - Parameters:
-        ///   - sequence: The elements to write to the asynchronous stream.
+        ///   - sequence: The elements to send to the channel.
         ///   - onProduceMore: The callback which gets invoked once more elements should be produced. This callback might be
-        ///   invoked during the call to ``write(contentsOf:onProduceMore:)``.
-        public func write<S>(contentsOf sequence: S, onProduceMore: @escaping @Sendable (Result<Void, Error>) -> Void) where Element == S.Element, S : Sequence
+        ///   invoked during the call to ``send(contentsOf:onProduceMore:)``.
+        public func send<S>(contentsOf sequence: S, onProduceMore: @escaping @Sendable (Result<Void, Error>) -> Void) where Element == S.Element, S : Sequence
 
-        /// Writes the element to the asynchronous stream.
+        /// Sends the element to the channel.
         ///
-        /// If there is a task consuming the stream and awaiting the next element then the task will get resumed with the
-        /// provided element. If the asynchronous stream already terminated then `onProduceMore` will be invoked with
+        /// If there is a task consuming the channel and awaiting the next element then the task will get resumed with the
+        /// provided element. If the channel already terminated then `onProduceMore` will be invoked with
         /// a `Result.failure`.
         ///
         /// - Parameters:
-        ///   - sequence: The element to write to the asynchronous stream.
+        ///   - element: The element to send to the channel.
         ///   - onProduceMore: The callback which gets invoked once more elements should be produced. This callback might be
-        ///   invoked during the call to ``write(_:onProduceMore:)``.
-        public func write(_ element: Element, onProduceMore: @escaping @Sendable (Result<Void, Error>) -> Void)
+        ///   invoked during the call to ``send(_:onProduceMore:)``.
+        public func send(_ element: Element, onProduceMore: @escaping @Sendable (Result<Void, Error>) -> Void)
 
-        /// Write new elements to the asynchronous stream.
+        /// Send new elements to the channel.
         ///
-        /// If there is a task consuming the stream and awaiting the next element then the task will get resumed with the
-        /// first element of the provided sequence. If the asynchronous stream already terminated then this method will throw an error
+        /// If there is a task consuming the channel and awaiting the next element then the task will get resumed with the
+        /// first element of the provided sequence. If the channel already terminated then this method will throw an error
         /// indicating the failure.
         ///
         /// This method returns once more elements should be produced.
         ///
         /// - Parameters:
-        ///   - sequence: The elements to write to the asynchronous stream.
-        public func write<S>(contentsOf sequence: S) async throws where Element == S.Element, S : Sequence
+        ///   - sequence: The elements to send to the channel.
+        public func send<S>(contentsOf sequence: S) async throws where Element == S.Element, S : Sequence
 
-        /// Write new element to the asynchronous stream.
+        /// Send new element to the channel.
         ///
-        /// If there is a task consuming the stream and awaiting the next element then the task will get resumed with the
-        /// provided element. If the asynchronous stream already terminated then this method will throw an error
+        /// If there is a task consuming the channel and awaiting the next element then the task will get resumed with the
+        /// provided element. If the channel already terminated then this method will throw an error
         /// indicating the failure.
         ///
         /// This method returns once more elements should be produced.
         ///
         /// - Parameters:
-        ///   - sequence: The element to write to the asynchronous stream.
-        public func write(_ element: Element) async throws
+        ///   - element: The element to send to the channel.
+        public func send(_ element: Element) async throws
 
-        /// Write the elements of the asynchronous sequence to the asynchronous stream.
+        /// Send the elements of the asynchronous sequence to the channel.
         ///
-        /// This method returns once the provided asynchronous sequence or the  the asynchronous stream finished.
+        /// This method returns once the provided asynchronous sequence or  the channel finished.
         ///
         /// - Important: This method does not finish the source if consuming the upstream sequence terminated.
         ///
         /// - Parameters:
-        ///   - sequence: The elements to write to the asynchronous stream.
-        public func write<S>(contentsOf sequence: S) async throws where Element == S.Element, S : AsyncSequence
+        ///   - sequence: The elements to send to the channel.
+        public func send<S>(contentsOf sequence: S) async throws where Element == S.Element, S : AsyncSequence
 
         /// Indicates that the production terminated.
         ///
         /// After all buffered elements are consumed the next iteration point will return `nil` or throw an error.
         ///
-        /// Calling this function more than once has no effect. After calling finish, the stream enters a terminal state and doesn't accept
+        /// Calling this function more than once has no effect. After calling finish, the channel enters a terminal state and doesn't accept
         /// new elements.
         ///
         /// - Parameters:
         ///   - error: The error to throw, or `nil`, to finish normally.
-        public func finish(throwing error: Failure?)
+        public func finish(throwing error: Failure? = nil)
     }
 }
 
-extension AsyncBackpressuredStream {
-    public struct Iterator : AsyncIteratorProtocol {
-        public mutating func next() async throws -> Element?
-    }
+extension MultiProducerSingleConsumerChannel {
+    /// The asynchronous iterator for iterating the channel.
+    ///
+    /// This type is not `Sendable`. Don't use it from multiple
+    /// concurrent contexts. It is a programmer error to invoke `next()` from a
+    /// concurrent context that contends with another such call, which
+    /// results in a call to `fatalError()`.
+    public struct Iterator: AsyncIteratorProtocol {}
+
+    /// Creates the asynchronous iterator that produces elements of this
+    /// asynchronous sequence.
     public func makeAsyncIterator() -> Iterator
 }
 
-extension AsyncBackpressuredStream: Sendable where Element: Sendable {}
-
-@available(*, unavailable)
-extension AsyncBackpressuredStream.Iterator: Sendable {}
-```
-
-Additionally, this proposal adds a new `AsyncNonThrowingBackpressuredStream`
-which is identical to the above except that it has only one generic parameter
-and that the `Source` doesn't offer a `finish(throwing:)` method.
-
-```swift
-public struct AsyncNonThrowingBackpressuredStream<Element>: AsyncSequence { ... }
+extension MultiProducerSingleConsumerChannel: Sendable where Element : Sendable {}
 ```
 
 ## Comparison to other root asynchronous sequences
@@ -570,16 +577,6 @@ generic and fully inlinable type and quite unwiedly to use. This proposal is
 heavily inspired by the learnings from this type but tries to create a more
 flexible and easier to use API that fits into the standard library.
 
-## Source compatibility
-
-This change is additive and does not affect source compatibility.
-
-## ABI compatibility
-
-This change is additive and does not affect ABI compatibility. All new methods
-are non-inlineable leaving us flexiblity to change the implementation in the
-future.
-
 ## Future directions
 
 ### Adaptive backpressure strategy
@@ -590,83 +587,7 @@ An adaptive strategy regulates the backpressure based on the rate of
 consumption and production. With the proposed new APIs we can easily add further
 strategies.
 
-### Element size dependent strategy
-
-When the stream's element is a collection type then the proposed high/low
-watermark backpressure strategy might lead to unexpected results since each
-element can vary in actual memory size. In the future, we could provide a new
-backpressure strategy that supports inspecting the size of the collection.
-
-### Deprecate `Async[Throwing]Stream.Continuation`
-
-In the future, we could deprecate the current continuation based APIs since the
-new proposed APIs are also capable of bridging non-backpressured producers by
-just discarding the `WriteResult`. The only use-case that the new APIs do not
-cover is the _anycast_ behaviour of the current `AsyncStream` where one can
-create multiple iterators to the stream as long as no two iterators are
-consuming the stream at the same time. This can be solved via additional
-algorithms such as `broadcast` in the `swift-async-algorithms` package.
-
-To give developers more time to adopt the new APIs the deprecation of the
-current APIs should be deferred to a future version. Especially since those new
-APIs are not backdeployed like the current Concurrency runtime.
-
-### Introduce a `Writer` and an `AsyncWriter` protocol
-
-The newly introduced `Source` type offers a bunch of different write methods. We
-have seen similar types used in other places such as file abstraction or
-networking APIs. We could introduce a new `Writer` and `AsyncWriter` protocol in
-the future to enable writing generic algorithms on top of writers. The `Source`
-type could then conform to these new protocols.
-
 ## Alternatives considered
-
-### Providing an `Async[Throwing]Stream.Continuation.onConsume`
-
-We could add a new closure property to the `Async[Throwing]Stream.Continuation`
-which is invoked once an element has been consumed to implement a backpressure
-strategy; however, this requires the usage of a synchronization mechanism since
-the consumption and production often happen on separate threads. The
-added complexity and performance impact led to avoiding this approach.
-
-### Provide a getter for the current buffer depth
-
-We could provide a getter for the current buffer depth on the
-`Async[Throwing]Stream.Continuation`. This could be used to query the buffer
-depth at an arbitrary time; however, it wouldn't allow us to implement
-backpressure strategies such as high/low watermarks without continuously asking
-what the buffer depth is. That would result in a very inefficient
-implementation. 
-
-### Extending `Async[Throwing]Stream.Continuation`
-
-Extending the current APIs to support all expected behaviors is problematic
-since it would change the semantics and might lead to currently working code
-misbehaving. Furthermore, extending the current APIs to support backpressure
-turns out to be problematic without compromising performance or usability.
-
-### Introducing a new type
-
-We could introduce a new type such as `AsyncBackpressured[Throwing]Stream`;
-however, one of the original intentions of `Async[Throwing]Stream` was to be
-able to bridge backpressured systems. Furthermore, `Async[Throwing]Stream` is
-the best name. Therefore, this proposal decided to provide new interfaces to
-`Async[Throwing]Stream`.
-
-### Stick with the current `Continuation` and `yield` naming
-
-The proposal decided against sticking to the current names since the existing
-names caused confusion to them being used in multiple places. Continuation was
-both used by the `AsyncStream` but also by Swift Concurrency via
-`CheckedContinuation` and `UnsafeContinuation`. Similarly, yield was used by
-both `AsyncStream.Continuation.yield()`, `Task.yield()` and the `yield` keyword.
-Having different names for these different concepts makes it easier to explain
-their usage. The currently proposed `write` names were choosen to align with the
-future direction of adding an `AsyncWriter` protocol. `Source` is a common name
-in flow based systems such as Akka. Other names that were considered:
-
-- `enqueue`
-- `send`
 
 ### Provide the `onTermination` callback to the factory method
 
