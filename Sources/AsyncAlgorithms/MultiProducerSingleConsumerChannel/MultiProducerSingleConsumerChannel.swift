@@ -72,9 +72,9 @@ public struct MultiProducerSingleConsumerChannel<Element, Failure: Error>: Async
     /// can tell the producer when any potential consumer went away.
     private final class _Backing: Sendable {
         /// The underlying storage.
-        fileprivate let storage: _MultiProducerSingleConsumerChannelBackpressuredStorage<Element, Failure>
+        fileprivate let storage: _Storage
 
-        init(storage: _MultiProducerSingleConsumerChannelBackpressuredStorage<Element, Failure>) {
+        init(storage: _Storage) {
             self.storage = storage
         }
 
@@ -113,7 +113,7 @@ public struct MultiProducerSingleConsumerChannel<Element, Failure: Error>: Async
         throwing failureType: Failure.Type = Never.self,
         backpressureStrategy: Source.BackpressureStrategy
     ) -> NewChannel {
-        let storage = _MultiProducerSingleConsumerChannelBackpressuredStorage<Element, Failure>(
+        let storage = _Storage(
             backpressureStrategy: backpressureStrategy.internalBackpressureStrategy
         )
         let source = Source(storage: storage)
@@ -121,7 +121,7 @@ public struct MultiProducerSingleConsumerChannel<Element, Failure: Error>: Async
         return .init(channel: .init(storage: storage), source: source)
     }
 
-    init(storage: _MultiProducerSingleConsumerChannelBackpressuredStorage<Element, Failure>) {
+    init(storage: _Storage) {
         self.backing = .init(storage: storage)
     }
 }
@@ -135,7 +135,7 @@ extension MultiProducerSingleConsumerChannel {
     public struct Source: ~Copyable, Sendable {
         /// A strategy that handles the backpressure of the channel.
         public struct BackpressureStrategy: Sendable {
-            var internalBackpressureStrategy: _MultiProducerSingleConsumerChannelInternalBackpressureStrategy<Element>
+            var internalBackpressureStrategy: _InternalBackpressureStrategy
 
             /// A backpressure strategy using a high and low watermark to suspend and resume production respectively.
             ///
@@ -223,9 +223,9 @@ extension MultiProducerSingleConsumerChannel {
         }
 
         @usableFromInline
-        let _storage: _MultiProducerSingleConsumerChannelBackpressuredStorage<Element, Failure>
+        let _storage: _Storage
 
-        internal init(storage: _MultiProducerSingleConsumerChannelBackpressuredStorage<Element, Failure>) {
+        internal init(storage: _Storage) {
             self._storage = storage
         }
 
@@ -439,9 +439,9 @@ extension MultiProducerSingleConsumerChannel {
         @usableFromInline
         final class _Backing {
             @usableFromInline
-            let storage: _MultiProducerSingleConsumerChannelBackpressuredStorage<Element, Failure>
+            let storage: _Storage
 
-            init(storage: _MultiProducerSingleConsumerChannelBackpressuredStorage<Element, Failure>) {
+            init(storage: _Storage) {
                 self.storage = storage
                 self.storage.iteratorInitialized()
             }
@@ -454,7 +454,7 @@ extension MultiProducerSingleConsumerChannel {
         @usableFromInline
         let _backing: _Backing
 
-        init(storage: _MultiProducerSingleConsumerChannelBackpressuredStorage<Element, Failure>) {
+        init(storage: _Storage) {
             self._backing = .init(storage: storage)
         }
 
@@ -464,7 +464,6 @@ extension MultiProducerSingleConsumerChannel {
             try await self._backing.storage.next(isolation: nil)
         }
 
-        @available(macOS 15.0, iOS 18.0, watchOS 11.0, tvOS 18.0, visionOS 2.0, *)
         @inlinable
         public mutating func next(
             isolation actor: isolated (any Actor)? = #isolation
