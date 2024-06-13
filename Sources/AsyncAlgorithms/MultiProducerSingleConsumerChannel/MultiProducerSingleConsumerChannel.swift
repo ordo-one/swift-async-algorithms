@@ -87,7 +87,7 @@ public struct MultiProducerSingleConsumerChannel<Element, Failure: Error>: Async
     private let backing: _Backing
 
     @frozen
-    public struct NewChannel: ~Copyable {
+    public struct ChannelAndStream: ~Copyable {
         public var channel: MultiProducerSingleConsumerChannel
         public var source: Source
 
@@ -112,7 +112,7 @@ public struct MultiProducerSingleConsumerChannel<Element, Failure: Error>: Async
         of elementType: Element.Type = Element.self,
         throwing failureType: Failure.Type = Never.self,
         backpressureStrategy: Source.BackpressureStrategy
-    ) -> NewChannel {
+    ) -> ChannelAndStream {
         let storage = _Storage(
             backpressureStrategy: backpressureStrategy.internalBackpressureStrategy
         )
@@ -187,7 +187,7 @@ extension MultiProducerSingleConsumerChannel {
         public enum SendResult: ~Copyable, Sendable {
             /// A token that is returned when the channel's backpressure strategy indicated that production should
             /// be suspended. Use this token to enqueue a callback by  calling the ``enqueueCallback(_:)`` method.
-            public struct CallbackToken: ~Copyable, Sendable {
+            public struct CallbackToken: Sendable {
                 @usableFromInline
                 let _id: UInt64
 
@@ -230,8 +230,7 @@ extension MultiProducerSingleConsumerChannel {
         }
 
         deinit {
-            // TODO: We can't finish here.
-//            self.finish()
+            self._storage.sourceDeinitialized()
         }
 
 

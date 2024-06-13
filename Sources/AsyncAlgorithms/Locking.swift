@@ -18,7 +18,7 @@ import WinSDK
 #endif
 
 @usableFromInline
-internal struct Lock {
+internal class Lock {
 #if canImport(Darwin)
     @usableFromInline
   typealias Primitive = os_unfair_lock
@@ -35,12 +35,17 @@ internal struct Lock {
   
     @usableFromInline
   typealias PlatformLock = UnsafeMutablePointer<Primitive>
+    @usableFromInline
   let platformLock: PlatformLock
 
   private init(_ platformLock: PlatformLock) {
     self.platformLock = platformLock
   }
-  
+
+    deinit {
+        self.deinitialize()
+    }
+
   fileprivate static func initialize(_ platformLock: PlatformLock) {
 #if canImport(Darwin)
     platformLock.initialize(to: os_unfair_lock())
@@ -93,10 +98,12 @@ internal struct Lock {
     Lock.deinitialize(platformLock)
   }
 
+  @inlinable
   func lock() {
     Lock.lock(platformLock)
   }
 
+    @inlinable
   func unlock() {
     Lock.unlock(platformLock)
   }
@@ -109,6 +116,7 @@ internal struct Lock {
     ///
     /// - Parameter body: The block to execute while holding the lock.
     /// - Returns: The value returned by the block.
+    @inlinable
     func withLock<T>(_ body: () throws -> T) rethrows -> T {
         self.lock()
         defer {
