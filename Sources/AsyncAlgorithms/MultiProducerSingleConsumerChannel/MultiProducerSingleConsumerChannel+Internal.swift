@@ -97,7 +97,7 @@ extension MultiProducerSingleConsumerChannel {
 
         @usableFromInline
         var description: String {
-            switch consume self {
+            switch /*consume*/ self {
             case .watermark(let strategy):
                 return strategy.description
             case .unbounded(let unbounded):
@@ -107,7 +107,7 @@ extension MultiProducerSingleConsumerChannel {
 
         @inlinable
         mutating func didSend(elements: Deque<Element>.SubSequence) -> Bool {
-            switch consume self {
+            switch /*consume*/ self {
             case .watermark(var strategy):
                 let result = strategy.didSend(elements: elements)
                 self = .watermark(strategy)
@@ -121,7 +121,7 @@ extension MultiProducerSingleConsumerChannel {
 
         @inlinable
         mutating func didConsume(element: Element) -> Bool {
-            switch consume self {
+            switch /*consume*/ self {
             case .watermark(var strategy):
                 let result = strategy.didConsume(element: element)
                 self = .watermark(strategy)
@@ -244,7 +244,7 @@ extension MultiProducerSingleConsumerChannel {
             }
         }
 
-        @inlinable
+        //@inlinable
         func send(
             contentsOf sequence: some Sequence<Element>
         ) throws -> MultiProducerSingleConsumerChannel<Element, Failure>.Source.SendResult {
@@ -272,7 +272,7 @@ extension MultiProducerSingleConsumerChannel {
             }
         }
 
-        @inlinable
+        //@inlinable
         func enqueueProducer(
             callbackToken: UInt64,
             continuation: UnsafeContinuation<Void, any Error>
@@ -293,7 +293,7 @@ extension MultiProducerSingleConsumerChannel {
             }
         }
 
-        @inlinable
+        //@inlinable
         func enqueueProducer(
             callbackToken: UInt64,
             onProduceMore: sending @escaping (Result<Void, Error>) -> Void
@@ -314,7 +314,7 @@ extension MultiProducerSingleConsumerChannel {
             }
         }
 
-        @inlinable
+        //@inlinable
         func cancelProducer(
             callbackToken: UInt64
         ) {
@@ -336,7 +336,7 @@ extension MultiProducerSingleConsumerChannel {
             }
         }
 
-        @inlinable
+        //@inlinable
         func finish(_ failure: Failure?) {
             let action = self._lock.withLock {
                 self._stateMachine.finish(failure)
@@ -371,7 +371,7 @@ extension MultiProducerSingleConsumerChannel {
             }
         }
 
-        @inlinable
+        //@inlinable
         func next(isolation actor: isolated (any Actor)?) async throws -> Element? {
             let action = self._lock.withLock {
                 self._stateMachine.next()
@@ -411,7 +411,7 @@ extension MultiProducerSingleConsumerChannel {
             }
         }
 
-        @inlinable
+        //@inlinable
         func suspendNext(isolation actor: isolated (any Actor)?) async throws -> Element? {
             return try await withTaskCancellationHandler {
                 return try await withUnsafeThrowingContinuation { continuation in
@@ -488,10 +488,10 @@ extension MultiProducerSingleConsumerChannel._Storage {
         @usableFromInline
         var _state: _State
 
-        @inlinable
+        //@inlinable
         var _onTermination: (@Sendable () -> Void)? {
             set {
-                switch consume self._state {
+                switch (consume self)._state {
                 case .channeling(var channeling):
                     channeling.onTermination = newValue
                     self = .init(state: .channeling(channeling))
@@ -535,7 +535,7 @@ extension MultiProducerSingleConsumerChannel._Storage {
             )
         }
 
-        @inlinable
+        //@inlinable
         init(state: consuming _State) {
                 self._state = state
         }
@@ -552,9 +552,9 @@ extension MultiProducerSingleConsumerChannel._Storage {
             )
         }
 
-        @inlinable
+        //@inlinable
         mutating func sourceDeinitialized() -> SourceDeinitializedAction? {
-            switch consume self._state {
+            switch (consume self)._state {
             case .channeling(var channeling):
                 channeling.activeProducers -= 1
 
@@ -605,10 +605,10 @@ extension MultiProducerSingleConsumerChannel._Storage {
             )
         }
 
-        @inlinable
+        //@inlinable
         mutating func sequenceDeinitialized() -> SequenceDeinitializedAction? {
-            switch consume self._state {
-            case .channeling(let channeling):
+            switch (consume self)._state {
+            case .channeling(var channeling):
                 guard channeling.iteratorInitialized else {
                     // No iterator was created so we can transition to finished right away.
                     self = .init(state: .finished(.init(iteratorInitialized: false, sourceFinished: false)))
@@ -624,7 +624,7 @@ extension MultiProducerSingleConsumerChannel._Storage {
 
                 return .none
 
-            case .sourceFinished(let sourceFinished):
+            case .sourceFinished(var sourceFinished):
                 guard sourceFinished.iteratorInitialized else {
                     // No iterator was created so we can transition to finished right away.
                     self = .init(state: .finished(.init(iteratorInitialized: false, sourceFinished: true)))
@@ -637,7 +637,7 @@ extension MultiProducerSingleConsumerChannel._Storage {
 
                 return .none
 
-            case .finished(let finished):
+            case .finished(var finished):
                 // We are already finished so there is nothing left to clean up.
                 // This is just the references dropping afterwards.
                 self = .init(state: .finished(finished))
@@ -646,9 +646,9 @@ extension MultiProducerSingleConsumerChannel._Storage {
             }
         }
 
-        @inlinable
+        //@inlinable
         mutating func iteratorInitialized() {
-            switch consume self._state {
+            switch (consume self)._state {
             case .channeling(var channeling):
                 if channeling.iteratorInitialized {
                     // Our sequence is a unicast sequence and does not support multiple AsyncIterator's
@@ -691,9 +691,9 @@ extension MultiProducerSingleConsumerChannel._Storage {
             )
         }
 
-        @inlinable
+        //@inlinable
         mutating func iteratorDeinitialized() -> IteratorDeinitializedAction? {
-            switch consume self._state {
+            switch (consume self)._state {
             case .channeling(let channeling):
                 if channeling.iteratorInitialized {
                     // An iterator was created and deinited. Since we only support
@@ -721,7 +721,7 @@ extension MultiProducerSingleConsumerChannel._Storage {
                     fatalError("MultiProducerSingleConsumerChannel internal inconsistency")
                 }
 
-            case .finished(let finished):
+            case .finished(var finished):
                 // We are already finished so there is nothing left to clean up.
                 // This is just the references dropping afterwards.
                 self = .init(state: .finished(finished))
@@ -781,9 +781,9 @@ extension MultiProducerSingleConsumerChannel._Storage {
             }
         }
 
-        @inlinable
+        //@inlinable
         mutating func send(_ sequence: some Sequence<Element>) -> SendAction {
-            switch consume self._state {
+            switch (consume self)._state {
             case .channeling(var channeling):
                 // We have an element and can resume the continuation
                 let bufferEndIndexBeforeAppend = channeling.buffer.endIndex
@@ -846,12 +846,12 @@ extension MultiProducerSingleConsumerChannel._Storage {
             case resumeProducerWithError((Result<Void, Error>) -> Void, Error)
         }
 
-        @inlinable
+        //@inlinable
         mutating func enqueueProducer(
             callbackToken: UInt64,
             onProduceMore: sending @escaping (Result<Void, Error>) -> Void
         ) -> EnqueueProducerAction? {
-            switch consume self._state {
+            switch (consume self)._state {
             case .channeling(var channeling):
                 if let index = channeling.cancelledAsyncProducers.firstIndex(of: callbackToken) {
                     // Our producer got marked as cancelled.
@@ -896,12 +896,12 @@ extension MultiProducerSingleConsumerChannel._Storage {
             case resumeProducerWithError(UnsafeContinuation<Void, any Error>, Error)
         }
 
-        @inlinable
+        //@inlinable
         mutating func enqueueContinuation(
             callbackToken: UInt64,
             continuation: UnsafeContinuation<Void, any Error>
         ) -> EnqueueContinuationAction? {
-            switch consume self._state {
+            switch (consume self)._state {
             case .channeling(var channeling):
                 if let index = channeling.cancelledAsyncProducers.firstIndex(of: callbackToken) {
                     // Our producer got marked as cancelled.
@@ -944,11 +944,11 @@ extension MultiProducerSingleConsumerChannel._Storage {
             case resumeProducerWithCancellationError(_MultiProducerSingleConsumerSuspendedProducer)
         }
 
-        @inlinable
+        //@inlinable
         mutating func cancelProducer(
             callbackToken: UInt64
         ) -> CancelProducerAction? {
-            switch consume self._state {
+            switch (consume self)._state {
             case .channeling(var channeling):
                 guard let index = channeling.suspendedProducers.firstIndex(where: { $0.0 == callbackToken }) else {
                     // The task that sends was cancelled before sending elements so the cancellation handler
@@ -998,9 +998,9 @@ extension MultiProducerSingleConsumerChannel._Storage {
             )
         }
 
-        @inlinable
+        //@inlinable
         mutating func finish(_ failure: Failure?) -> FinishAction? {
-            switch consume self._state {
+            switch (consume self)._state {
             case .channeling(let channeling):
                 guard let consumerContinuation = channeling.consumerContinuation else {
                     // We don't have a suspended consumer so we are just going to mark
@@ -1057,9 +1057,9 @@ extension MultiProducerSingleConsumerChannel._Storage {
             case suspendTask
         }
 
-        @inlinable
+        //@inlinable
         mutating func next() -> NextAction {
-            switch consume self._state {
+            switch (consume self)._state {
             case .channeling(var channeling):
                 guard channeling.consumerContinuation == nil else {
                     // We have multiple AsyncIterators iterating the sequence
@@ -1131,9 +1131,9 @@ extension MultiProducerSingleConsumerChannel._Storage {
             case resumeConsumerWithNil(UnsafeContinuation<Element?, Error>)
         }
 
-        @inlinable
+        //@inlinable
         mutating func suspendNext(continuation: UnsafeContinuation<Element?, Error>) -> SuspendNextAction? {
-            switch consume self._state {
+            switch (consume self)._state {
             case .channeling(var channeling):
                 guard channeling.consumerContinuation == nil else {
                     // We have multiple AsyncIterators iterating the sequence
@@ -1198,9 +1198,9 @@ extension MultiProducerSingleConsumerChannel._Storage {
             case failProducersAndCallOnTermination(_TinyArray<_MultiProducerSingleConsumerSuspendedProducer>, (() -> Void)?)
         }
 
-        @inlinable
+        //@inlinable
         mutating func cancelNext() -> CancelNextAction? {
-            switch consume self._state {
+            switch (consume self)._state {
             case .channeling(let channeling):
                 self = .init(state: .finished(.init(iteratorInitialized: channeling.iteratorInitialized, sourceFinished: false)))
 
@@ -1219,12 +1219,12 @@ extension MultiProducerSingleConsumerChannel._Storage {
                     channeling.onTermination
                 )
 
-            case .sourceFinished(let sourceFinished):
+            case .sourceFinished(var sourceFinished):
                 self = .init(state: .sourceFinished(sourceFinished))
 
                 return .none
 
-            case .finished(let finished):
+            case .finished(var finished):
                 self = .init(state: .finished(finished))
 
                 return .none
@@ -1282,7 +1282,7 @@ extension MultiProducerSingleConsumerChannel._Storage._StateMachine {
                 "backpressure:\(self.backpressureStrategy.description) iteratorInitialized:\(self.iteratorInitialized) buffer:\(self.buffer.count) consumerContinuation:\(self.consumerContinuation == nil) producerContinuations:\(self.suspendedProducers.count) cancelledProducers:\(self.cancelledAsyncProducers.count) hasOutstandingDemand:\(self.hasOutstandingDemand)"
             }
 
-            @inlinable
+            //@inlinable
             init(
                 backpressureStrategy: MultiProducerSingleConsumerChannel._InternalBackpressureStrategy,
                 iteratorInitialized: Bool,
@@ -1338,7 +1338,7 @@ extension MultiProducerSingleConsumerChannel._Storage._StateMachine {
                 "iteratorInitialized:\(self.iteratorInitialized) buffer:\(self.buffer.count) failure:\(self.failure == nil)"
             }
 
-            @inlinable
+            //@inlinable
             init(
                 iteratorInitialized: Bool,
                 buffer: Deque<Element>,
@@ -1366,7 +1366,7 @@ extension MultiProducerSingleConsumerChannel._Storage._StateMachine {
                 "iteratorInitialized:\(self.iteratorInitialized) sourceFinished:\(self.sourceFinished)"
             }
 
-            @inlinable
+            //@inlinable
             init(
                 iteratorInitialized: Bool,
                 sourceFinished: Bool
