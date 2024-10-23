@@ -251,7 +251,7 @@ extension MultiProducerSingleConsumerChannel {
         ///
         /// - Parameter sequence: The elements to send to the channel.
         /// - Returns: The result that indicates if more elements should be produced at this time.
-        @inlinable
+        //@inlinable
         public mutating func send<S>(contentsOf sequence: sending S) throws -> SendResult where Element == S.Element, S: Sequence {
             try self._storage.send(contentsOf: sequence)
         }
@@ -264,7 +264,7 @@ extension MultiProducerSingleConsumerChannel {
         ///
         /// - Parameter element: The element to send to the channel.
         /// - Returns: The result that indicates if more elements should be produced at this time.
-        @inlinable
+        //@inlinable
         public mutating func send(_ element: sending Element) throws -> SendResult {
             try self._storage.send(contentsOf: CollectionOfOne(element))
         }
@@ -278,7 +278,7 @@ extension MultiProducerSingleConsumerChannel {
         /// - Parameters:
         ///   - callbackToken: The callback token.
         ///   - onProduceMore: The callback which gets invoked once more elements should be produced.
-        @inlinable
+        //@inlinable
         public mutating func enqueueCallback(
             callbackToken: consuming SendResult.CallbackToken,
             onProduceMore: sending @escaping (Result<Void, Error>) -> Void
@@ -294,7 +294,7 @@ extension MultiProducerSingleConsumerChannel {
         /// will mark the passed `callbackToken` as cancelled.
         ///
         /// - Parameter callbackToken: The callback token.
-        @inlinable
+        //@inlinable
         public mutating func cancelCallback(callbackToken: consuming SendResult.CallbackToken) {
             self._storage.cancelProducer(callbackToken: callbackToken._id)
         }
@@ -357,7 +357,7 @@ extension MultiProducerSingleConsumerChannel {
         ///
         /// - Parameters:
         ///   - sequence: The elements to send to the channel.
-        @inlinable
+        //@inlinable
         public mutating func send<S>(contentsOf sequence: sending S) async throws where Element == S.Element, S: Sequence {
             let sendResult = try { try self.send(contentsOf: sequence) }()
 
@@ -420,7 +420,7 @@ extension MultiProducerSingleConsumerChannel {
         ///
         /// - Parameters:
         ///   - error: The error to throw, or `nil`, to finish normally.
-        @inlinable
+        //@inlinable
         public consuming func finish(throwing error: Failure? = nil) {
             self._storage.finish(error)
         }
@@ -458,12 +458,12 @@ extension MultiProducerSingleConsumerChannel {
         }
 
         @_disfavoredOverload
-        @inlinable
+        //@inlinable
         public mutating func next() async throws -> Element? {
             try await self._backing.storage.next(isolation: nil)
         }
 
-        @inlinable
+        //@inlinable
         public mutating func next(
             isolation actor: isolated (any Actor)? = #isolation
         ) async throws(Failure) -> Element? {
