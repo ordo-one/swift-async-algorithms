@@ -489,6 +489,41 @@ final class MultiProducerSingleConsumerChannelTests: XCTestCase {
         }
     }
 
+    func testOneOfTwoSourcesDeinitialized() async throws {
+        let channelAndStream = MultiProducerSingleConsumerChannel.makeChannel(
+            of: Int.self,
+            throwing: Never.self,
+            backpressureStrategy: .watermark(low: 5, high: 10)
+        )
+
+        let channel = channelAndStream.channel
+        let consumerTask = Task {
+            var count = 0
+            for await _ in channel {
+                count += 1
+                if count == 2 {
+                    break
+                }
+            }
+            return count
+        }
+
+        var source = consume channelAndStream.source
+        _ = try await {
+            var source = source.copy()
+            _ = try await source.send(1)
+        }()
+
+        do {
+            _ = try await source.send(2)
+        } catch {
+            XCTFail("source.send() unexpectedly failed \(error)")
+        }
+
+        let consumedEvents = await consumerTask.value
+        XCTAssertEqual(consumedEvents, 2)
+    }
+
     // MARK: - write
 
     func testWrite_whenInitial() async throws {
