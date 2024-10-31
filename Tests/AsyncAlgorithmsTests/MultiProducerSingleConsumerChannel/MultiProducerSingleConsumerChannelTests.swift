@@ -510,8 +510,8 @@ final class MultiProducerSingleConsumerChannelTests: XCTestCase {
 
         var source = consume channelAndStream.source
         _ = try await {
-            var source = source.copy()
-            _ = try await source.send(1)
+            var sourceCopy = source.copy()
+            _ = try await sourceCopy.send(1)
         }()
 
         do {
